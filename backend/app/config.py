@@ -9,7 +9,9 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     
     # Semantic Cache Settings
-    SIMULATED_CACHE: bool = True
+    EMBEDDING_PROVIDER: str = "sentence-transformers"
+    EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
+    SIMULATED_CACHE: bool = False
     SIMILARITY_THRESHOLD: float = 0.82
     CACHE_MAX_ENTRIES: int = 1000
     

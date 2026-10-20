@@ -1,5 +1,10 @@
 from .base import BaseCache, CacheEntry, CacheLookupResult
-from .embeddings import BaseEmbeddingProvider, SimulatedEmbeddingProvider
+from .embeddings import (
+    BaseEmbeddingProvider,
+    SentenceTransformersEmbeddingProvider,
+    SimulatedEmbeddingProvider,
+    get_embedding_provider,
+)
 from .semantic import SemanticCache, cosine_similarity
 
 __all__ = [
@@ -7,7 +12,9 @@ __all__ = [
     "CacheEntry",
     "CacheLookupResult",
     "BaseEmbeddingProvider",
+    "SentenceTransformersEmbeddingProvider",
     "SimulatedEmbeddingProvider",
+    "get_embedding_provider",
     "SemanticCache",
     "cosine_similarity",
 ]

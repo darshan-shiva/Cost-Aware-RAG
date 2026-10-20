@@ -5,7 +5,11 @@ from typing import Optional, Dict, Any
 
 from ..config import settings
 from ..schemas import QueryRequest, QueryResponse, RequestRecord
-from ..cache import SemanticCache, CacheLookupResult
+from ..cache import (
+    SemanticCache,
+    CacheLookupResult,
+    get_embedding_provider,
+)
 from ..routing import CostAwareRouter, RoutingDecision, ModelProfile
 from ..metrics import SQLiteMetricsStore
 
@@ -21,12 +25,30 @@ class QueryService:
         router: Optional[CostAwareRouter] = None,
         metrics_store: Optional[SQLiteMetricsStore] = None,
     ):
-        self.cache = cache or SemanticCache(
-            default_threshold=settings.SIMILARITY_THRESHOLD,
-            max_entries=settings.CACHE_MAX_ENTRIES,
-        )
+        
+        if cache is None:
+            if settings.SIMULATED_CACHE:
+                from ..cache.embeddings import SimulatedEmbeddingProvider
+
+                provider = SimulatedEmbeddingProvider()
+            else:
+                provider = get_embedding_provider(
+                    provider_type=settings.EMBEDDING_PROVIDER,
+                    model_name=settings.EMBEDDING_MODEL_NAME,
+                )
+
+            cache = SemanticCache(
+                embedding_provider=provider,
+                default_threshold=settings.SIMILARITY_THRESHOLD,
+                max_entries=settings.CACHE_MAX_ENTRIES,
+                db_path=settings.DATABASE_PATH,
+            )
+
+
+        self.cache = cache
         self.router = router or CostAwareRouter()
         self.metrics_store = metrics_store or SQLiteMetricsStore(settings.DATABASE_PATH)
+
 
     def _generate_mock_response(self, query: str, decision: RoutingDecision) -> str:
         model = decision.selected_model

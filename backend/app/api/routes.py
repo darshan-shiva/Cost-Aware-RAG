@@ -18,12 +18,14 @@ def get_query_service() -> QueryService:
     return _service_instance
 
 @router.get("/health", response_model=HealthResponse, tags=["System"])
-def health_check():
+def health_check(
+    service: QueryService = Depends(get_query_service),
+):
     """Application health and status check."""
     return HealthResponse(
         status="healthy",
         version=settings.VERSION,
-        simulated_mode=settings.SIMULATED_CACHE,
+        simulated_mode=service.cache.embedding_provider.is_simulated,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -43,7 +45,10 @@ def get_metrics_summary(
     service: QueryService = Depends(get_query_service),
 ):
     """Retrieve aggregate telemetry, hit rates, p50/p95 latencies, and estimated spend."""
-    return service.metrics_store.get_summary()
+    summary = service.metrics_store.get_summary()
+    summary.is_simulated = service.cache.embedding_provider.is_simulated
+    return summary
+
 
 @router.get("/api/metrics/requests", response_model=List[RequestRecord], tags=["Metrics"])
 def get_recent_requests(
