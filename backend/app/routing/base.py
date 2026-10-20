@@ -1,0 +1,29 @@
+from abc import ABC, abstractmethod
+from typing import Optional
+from pydantic import BaseModel, Field
+
+class ModelProfile(BaseModel):
+    model_id: str
+    tier: str  # "lightweight" or "complex"
+    cost_input_per_1k: float
+    cost_output_per_1k: float
+    description: str
+
+class RoutingDecision(BaseModel):
+    selected_model: ModelProfile
+    routing_reason: str
+    estimated_complexity: str  # "low", "medium", "high"
+    is_mock: bool = True
+
+class BaseRouter(ABC):
+    @abstractmethod
+    def route(self, query: str) -> RoutingDecision:
+        """Analyze query and determine appropriate model tier with routing reason."""
+        pass
+
+    @abstractmethod
+    def estimate_cost(
+        self, model: ModelProfile, input_tokens: int, output_tokens: int
+    ) -> float:
+        """Calculate estimated USD cost given input and output token counts."""
+        pass
