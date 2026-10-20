@@ -19,11 +19,12 @@ const PRESET_QUERIES = [
     desc: 'Triggers complex analytical routing (gpt-4o)',
   },
   {
-    label: '3. Cache Hit Test',
-    query: 'What is semantic caching in RAG pipelines?',
-    desc: 'Semantically identical query to verify cache hit & zero spend',
+    label: '3. Paraphrase Cache Hit',
+    query: 'Can you explain how semantic caching works in RAG pipelines?',
+    desc: 'Semantically rephrased query to verify dense vector cache hit',
   },
 ];
+
 
 export const QueryRunner: React.FC<QueryRunnerProps> = ({ onRunQuery, isLoading }) => {
   const [query, setQuery] = useState('');

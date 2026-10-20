@@ -1,8 +1,8 @@
 # Cost-Aware RAG: Semantic Caching & Intelligent Model Routing
 
-**Phase 1 — Initial Foundation**
+**Phase 2 — Real Semantic Caching with Dense Local Embeddings**
 
-A portfolio-grade AI infrastructure system designed to reduce LLM inference costs and response latencies through **semantic caching** and **complexity-based model routing**, coupled with a real-time observability telemetry dashboard.
+A portfolio-grade AI infrastructure system designed to reduce LLM inference costs and response latencies through **genuine embedding-based semantic caching** and **complexity-based model routing**, coupled with a real-time observability telemetry dashboard.
 
 ---
 
@@ -22,8 +22,16 @@ A portfolio-grade AI infrastructure system designed to reduce LLM inference cost
                                                   |
                                                   v
                                       +------------------------+
-                                      |     Semantic Cache     |
+                                      | SentenceTransformers   |
+                                      |   (all-MiniLM-L6-v2)   |
+                                      |    (384-dim Vectors)   |
+                                      +-----------+------------+
+                                                  |
+                                                  v
+                                      +------------------------+
+                                      | Persistent Cache       |
                                       | (Cosine Similarity)    |
+                                      | (SQLite + RAM Index)   |
                                       +-----+------------+-----+
                                             |            |
                                        Hit  |            |  Miss
@@ -52,39 +60,32 @@ A portfolio-grade AI infrastructure system designed to reduce LLM inference cost
 
 ---
 
-## Phase 1 Components
+## Phase 2 Implementation Highlights
 
-1. **Backend API (`FastAPI` & `Pydantic`)**:
-   - `GET /health` — Application health status and configuration verification.
-   - `POST /api/query` — Query-processing endpoint with cache lookup, model routing, and execution recording.
-   - `GET /api/metrics/summary` — Aggregate request counts, cache hit rate, total estimated spend, p50 and p95 latencies.
-   - `GET /api/metrics/requests` — Audit log of recent query executions and routing rationale.
-   - `POST /api/metrics/reset` — Development utility to flush metrics and in-memory cache.
+1. **Genuine Dense Semantic Embeddings (`SentenceTransformersEmbeddingProvider`)**:
+   - Model: `sentence-transformers/all-MiniLM-L6-v2` (384-dimensional dense vectors).
+   - Loaded once via singleton caching and reused across requests for high throughput and zero cold-start penalty per query.
+   - Normalized unit vectors (`normalize_embeddings=True`), allowing exact cosine similarity calculation via dot product.
+   - Robust error handling for empty queries, model loading errors, and Windows runtime isolation.
 
-2. **Semantic Caching Foundation**:
-   - Vector-based semantic similarity interface with cosine similarity calculations.
-   - Threshold-configured matching (`similarity_threshold: 0.82` default).
-   - In-memory vector store with LRU eviction and hit count tracking.
-   - Phase 1 uses a deterministic 64-dimensional feature-hashing embedder (`SimulatedEmbeddingProvider`), generating reproducible unit-length vector embeddings without requiring external GPU/API keys.
-   - Extension points documented for `sentence-transformers` or remote embedding APIs.
+2. **Persistent Semantic Cache (`SemanticCache`)**:
+   - In-memory vector index backed by SQLite table `cache_entries`.
+   - Persists query strings, responses, 384-dimensional embeddings (JSON format), timestamps, and hit counts across server restarts.
+   - Enforces configurable maximum entries (`CACHE_MAX_ENTRIES`) with LRU eviction.
+   - Bypassed on forced refresh requests (`force_refresh: true`).
+   - Rejects empty queries or empty model responses.
 
-3. **Cost-Aware Routing Foundation**:
-   - Query complexity analysis: evaluates lexical length, structural complexity, and multi-step reasoning keywords (`compare`, `analyze`, `tradeoffs`, `step-by-step`).
-   - Routes to **Lightweight Tier** (`llama-3.1-8b-instruct` at $0.00015 / $0.00060 per 1k tokens) or **Frontier Tier** (`gpt-4o` at $0.00250 / $0.01000 per 1k tokens).
-   - Provides explicit human-readable routing rationale for every decision.
-   - Computes transparent estimated spend per request.
+3. **Cost-Aware Routing Engine (`CostAwareRouter`)**:
+   - Evaluates query complexity (analytical keywords, token length, structured context).
+   - Routes to **Lightweight Tier** (`llama-3.1-8b-instruct`) or **Frontier Tier** (`gpt-4o`).
+   - Supplies human-readable routing rationale with every execution.
+   - Transparent cost calculation: Cache hits incur **$0.000000** LLM spend; cache misses calculate input/output token costs based on model tier.
 
-4. **Telemetry & Metrics Persistence**:
-   - SQLite persistence layer for request audit trail.
-   - Real-time calculation of exact p50 (median) and p95 (95th percentile) latencies using ordered rank calculation.
-   - Clear separation between estimated token cost and actual provider-reported cost.
-
-5. **Observability Dashboard (`React` + `TypeScript` + `Tailwind CSS` + `Recharts`)**:
-   - Restrained, dark-mode AI infrastructure design.
-   - Live KPI cards: Total Requests, Cache Hit Rate (with cost-savings badge), Estimated Spend, and p50/p95 Latency.
-   - Interactive pipeline runner to test simple queries, complex reasoning, and cache hits.
-   - Visual breakdown charts for Cache Hits vs Misses and Model Distribution.
-   - Expandable request log table with detailed routing rationale.
+4. **Telemetry & Observability Dashboard (`React` + `TypeScript` + `Recharts`)**:
+   - Live metrics: Total requests, cache hit rate, estimated LLM spend, and rank-ordered p50/p95 latencies.
+   - Interactive pipeline runner to test semantic paraphrases and cache hits with real-time feedback.
+   - Recharts visual breakdowns for Cache Outcomes and Model Distribution.
+   - Audit trail table with expandable execution metadata and similarity scores.
 
 ---
 
@@ -103,14 +104,14 @@ cd backend
 # Install dependencies
 pip install -r requirements.txt
 
-# Run backend tests
+# Run backend test suite (18 automated tests)
 python -m pytest tests -v
 
 # Start FastAPI development server
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-The backend API will be live at `http://127.0.0.1:8000`. You can explore the interactive OpenAPI documentation at `http://127.0.0.1:8000/docs`.
+The backend API will be live at `http://127.0.0.1:8000`. Interactive OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
 
 ### 2. Frontend Setup
 
@@ -137,6 +138,8 @@ Settings can be customized via environment variables with the `RAG_` prefix:
 
 | Variable | Default | Description |
 |---|---|---|
+| `RAG_EMBEDDING_PROVIDER` | `sentence-transformers` | Embedding provider (`sentence-transformers` or `simulated`) |
+| `RAG_EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | SentenceTransformers model identifier |
 | `RAG_SIMILARITY_THRESHOLD` | `0.82` | Cosine similarity threshold for semantic cache hits |
 | `RAG_CACHE_MAX_ENTRIES` | `1000` | Maximum entries before LRU eviction |
 | `RAG_LIGHTWEIGHT_MODEL_ID` | `llama-3.1-8b-instruct` | Model identifier for low-complexity queries |
@@ -145,11 +148,15 @@ Settings can be customized via environment variables with the `RAG_` prefix:
 
 ---
 
-## Known Boundaries & Next Phase (Phase 2)
+## Phase 2 Verification & Test Coverage
 
-- **Phase 1 Status**: Foundation complete with simulated embeddings, complexity heuristics, mock generation, SQLite metrics, and full observability UI. No external API keys required.
-- **Phase 2 Roadmap (Recommended Next)**:
-  - Integration of live embedding providers (`sentence-transformers` local or OpenAI/Cohere).
-  - Production vector index (FAISS, Chroma, or pgvector).
-  - Dynamic routing models with confidence scores.
-  - Live LLM streaming API integration with actual token usage parsing.
+All 18 automated tests pass across unit and integration levels:
+- `test_real_embedding_provider_properties`: 384-dimensional dense vectors, unit norm, non-simulated flag.
+- `test_real_embedding_batch`: Batch embedding consistency.
+- `test_real_semantic_paraphrase_hit`: Dense vector semantic matching for paraphrases.
+- `test_real_semantic_unrelated_query_miss`: Unrelated queries yield low similarity (<0.40) and miss.
+- `test_threshold_sensitivity`: Dynamic threshold adjustment switches between hit and miss.
+- `test_cache_persistence_across_restarts`: Cache entries survive server restarts via SQLite.
+- `test_empty_input_and_invalid_storage`: Empty queries and responses handled safely without crashes.
+- `test_cache_bypass_via_force_refresh`: `force_refresh=True` bypasses cache for fresh generation.
+- `test_health_check` & `test_query_flow_cache_miss_then_hit`: Full API contracts and telemetry persistence.
