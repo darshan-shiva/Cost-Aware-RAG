@@ -1,228 +1,219 @@
-
-"""Embedding providers for the Cost-Aware RAG semantic cache."""
-
-from __future__ import annotations
-
-import hashlib
-import threading
 from abc import ABC, abstractmethod
-from typing import Sequence
+import math
+import hashlib
+import logging
+import sys
+from typing import List, Dict, Optional, Any
 
-import numpy as np
-from sentence_transformers import SentenceTransformer
+# Ensure torchvision image registration does not trigger broken C++ runtime on Windows
+if "torchvision" not in sys.modules:
+    sys.modules["torchvision"] = None
+    sys.modules["torchvision.io"] = None
 
+logger = logging.getLogger(__name__)
 
 class BaseEmbeddingProvider(ABC):
-    """Common interface for embedding providers."""
+    """Abstract interface for embedding generation."""
 
-    provider_name: str
-    dimension: int
-    is_simulated: bool
+    @property
+    @abstractmethod
+    def provider_name(self) -> str:
+        pass
+
+    @property
+    @abstractmethod
+    def dimension(self) -> int:
+        pass
+
+    @property
+    @abstractmethod
+    def is_simulated(self) -> bool:
+        pass
 
     @abstractmethod
-    def embed_text(self, text: str | None) -> list[float]:
-        """Generate an embedding for one text."""
-        raise NotImplementedError
+    def embed_text(self, text: str) -> List[float]:
+        """Convert a single text into a normalized embedding vector."""
+        pass
 
-    @abstractmethod
-    def embed_batch(
-        self, texts: list[str]
-    ) -> list[list[float]]:
-        """Generate embeddings for multiple texts."""
-        raise NotImplementedError
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Batch embedding generation."""
+        return [self.embed_text(t) for t in texts]
 
 
 class SentenceTransformersEmbeddingProvider(BaseEmbeddingProvider):
-    """Generate real dense embeddings using a local Sentence Transformers model."""
+    """
+    Genuine dense semantic embedding provider using local SentenceTransformers models.
+    Loads and caches the model once for high-throughput, low-latency reuse across requests.
+    """
 
-    _model_cache: dict[str, SentenceTransformer] = {}
-    _model_cache_lock = threading.Lock()
+    _model_cache: Dict[str, Any] = {}
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        if not isinstance(model_name, str) or not model_name.strip():
-            raise ValueError("model_name must be a non-empty string")
+        self._model_name = model_name
+        self._dimension: Optional[int] = None
+        self._model = self._load_model(model_name)
 
-        self.model_name = model_name.strip()
-        self.provider_name = (
-            f"sentence-transformers/{self.model_name}"
-        )
-        self.is_simulated = False
+    @classmethod
+    def _load_model(cls, model_name: str) -> Any:
+        if model_name not in cls._model_cache:
+            try:
+                from sentence_transformers import SentenceTransformer
+                logger.info(f"Loading SentenceTransformer model: {model_name}")
+                model = SentenceTransformer(model_name)
+                cls._model_cache[model_name] = model
+            except Exception as e:
+                logger.error(f"Failed to load embedding model '{model_name}': {e}")
+                raise RuntimeError(
+                    f"Could not initialize local embedding model '{model_name}': {e}"
+                ) from e
+        return cls._model_cache[model_name]
 
-        # Load each configured model once per Python process.
-        with self._model_cache_lock:
-            if self.model_name not in self._model_cache:
-                try:
-                    self._model_cache[self.model_name] = (
-                        SentenceTransformer(self.model_name)
-                    )
-                except Exception as exc:
-                    raise RuntimeError(
-                        "Could not initialize local embedding model "
-                        f"'{self.model_name}': {exc}"
-                    ) from exc
+    @property
+    def provider_name(self) -> str:
+        return f"sentence-transformers/{self._model_name}"
 
-            self._model = self._model_cache[self.model_name]
+    @property
+    def dimension(self) -> int:
+        if self._dimension is None:
+            # Query dimension from model or run sample text
+            try:
+                if hasattr(self._model, "get_embedding_dimension"):
+                    self._dimension = self._model.get_embedding_dimension()
+                else:
+                    self._dimension = self._model.get_sentence_embedding_dimension()
+            except Exception:
+                sample = self._model.encode("dim check", convert_to_numpy=True)
+                self._dimension = int(sample.shape[0])
+        return self._dimension
 
-        self.dimension = int(
-            self._model.get_sentence_embedding_dimension()
-        )
 
-        if self.dimension <= 0:
-            raise RuntimeError(
-                "Embedding model returned an invalid dimension"
-            )
+    @property
+    def is_simulated(self) -> bool:
+        return False
 
-    def embed_text(self, text: str | None) -> list[float]:
-        """Return a normalized embedding, or a zero vector for empty input."""
-
+    def embed_text(self, text: str) -> List[float]:
         if text is None:
             return [0.0] * self.dimension
-
         if not isinstance(text, str):
-            raise TypeError("Expected string input")
+            raise TypeError(f"Expected string input for embedding, got {type(text).__name__}")
 
-        if not text.strip():
+        cleaned = text.strip()
+        if not cleaned:
             return [0.0] * self.dimension
 
-        return self.embed_batch([text])[0]
+        try:
+            # normalize_embeddings=True yields unit-norm vectors for exact cosine similarity
+            embedding = self._model.encode(
+                cleaned,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+            return [float(x) for x in embedding.tolist()]
+        except Exception as e:
+            logger.error(f"Error generating embedding for text '{cleaned[:40]}...': {e}")
+            raise RuntimeError(f"Embedding generation failed: {e}") from e
 
-    def embed_batch(
-        self, texts: list[str]
-    ) -> list[list[float]]:
-        """Encode texts in a batch and return normalized Python float lists."""
-
-        if not isinstance(texts, list) or any(
-            not isinstance(text, str) for text in texts
-        ):
-            raise TypeError("Expected list of strings")
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        if texts is None:
+            return []
+        if not isinstance(texts, list):
+            raise TypeError(f"Expected list of strings for batch embedding, got {type(texts).__name__}")
 
         if not texts:
             return []
 
-        results: list[list[float] | None] = [None] * len(texts)
-        nonempty_texts: list[str] = []
-        nonempty_indices: list[int] = []
-
-        for index, text in enumerate(texts):
-            if text.strip():
-                nonempty_texts.append(text)
-                nonempty_indices.append(index)
+        cleaned_texts = []
+        for t in texts:
+            if t is None:
+                cleaned_texts.append("")
+            elif not isinstance(t, str):
+                raise TypeError(f"Expected string element in texts list, got {type(t).__name__}")
             else:
-                results[index] = [0.0] * self.dimension
+                cleaned_texts.append(t.strip())
 
-        if nonempty_texts:
-            try:
-                vectors = self._model.encode(
-                    nonempty_texts,
-                    convert_to_numpy=True,
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                )
-                vectors = np.asarray(vectors, dtype=np.float32)
+        try:
+            embeddings = self._model.encode(
+                cleaned_texts,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+            return [[float(x) for x in emb.tolist()] for emb in embeddings]
+        except Exception as e:
+            logger.error(f"Error generating batch embeddings: {e}")
+            raise RuntimeError(f"Batch embedding generation failed: {e}") from e
 
-                if vectors.ndim == 1:
-                    vectors = vectors.reshape(1, -1)
-
-                if (
-                    vectors.ndim != 2
-                    or vectors.shape[0] != len(nonempty_texts)
-                    or vectors.shape[1] != self.dimension
-                ):
-                    raise ValueError(
-                        "Embedding model returned an unexpected shape"
-                    )
-
-                if not np.isfinite(vectors).all():
-                    raise ValueError(
-                        "Embedding model returned non-finite values"
-                    )
-
-                for index, vector in zip(
-                    nonempty_indices, vectors
-                ):
-                    results[index] = [
-                        float(value) for value in vector
-                    ]
-
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Embedding generation failed: {exc}"
-                ) from exc
-
-        return [
-            vector if vector is not None
-            else [0.0] * self.dimension
-            for vector in results
-        ]
 
 
 class SimulatedEmbeddingProvider(BaseEmbeddingProvider):
-    """Deterministic feature-hashing vectors for explicit mock/testing mode.
-
-    These are NOT genuine semantic embeddings.
+    """
+    Simulated embedding provider using deterministic feature hashing over
+    token and character n-grams, projected into a 64-dimensional unit hypersphere.
+    Retained as an isolated mock provider for testing and fallback scenarios.
     """
 
-    def __init__(self, dimension: int = 384):
-        if dimension <= 0:
-            raise ValueError("dimension must be positive")
+    def __init__(self, dimension: int = 64):
+        self._dimension = dimension
 
-        self.dimension = dimension
-        self.provider_name = "simulated-feature-hashing"
-        self.is_simulated = True
+    @property
+    def provider_name(self) -> str:
+        return "Simulated-Hashing-Embedder (64-dim)"
 
-    def embed_text(self, text: str | None) -> list[float]:
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def is_simulated(self) -> bool:
+        return True
+
+    def embed_text(self, text: str) -> List[float]:
         if text is None:
-            return [0.0] * self.dimension
-
+            return [0.0] * self._dimension
         if not isinstance(text, str):
-            raise TypeError("Expected string input")
+            raise TypeError(f"Expected string input, got {type(text).__name__}")
 
-        if not text.strip():
-            return [0.0] * self.dimension
+        cleaned = text.strip().lower()
+        if not cleaned:
+            return [0.0] * self._dimension
 
-        vector = np.zeros(self.dimension, dtype=np.float32)
-        tokens = text.lower().split()
 
+        vector = [0.0] * self._dimension
+        tokens = cleaned.split()
+
+        # Token hashing
         for token in tokens:
-            digest = hashlib.sha256(
-                token.encode("utf-8")
-            ).digest()
+            h = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
+            idx = h % self._dimension
+            sign = 1.0 if (h // self._dimension) % 2 == 0 else -1.0
+            vector[idx] += sign * 1.5
 
-            index = int.from_bytes(digest[:4], "big") % self.dimension
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vector[index] += sign
+        # Character tri-grams hashing for morphological similarity
+        if len(cleaned) >= 3:
+            for i in range(len(cleaned) - 2):
+                tri = cleaned[i : i + 3]
+                h = int(hashlib.sha256(tri.encode("utf-8")).hexdigest(), 16)
+                idx = h % self._dimension
+                sign = 1.0 if (h // self._dimension) % 2 == 0 else -1.0
+                vector[idx] += sign * 0.5
 
-        norm = float(np.linalg.norm(vector))
-        if norm > 0:
-            vector /= norm
-
-        return [float(value) for value in vector]
-
-    def embed_batch(
-        self, texts: list[str]
-    ) -> list[list[float]]:
-        if not isinstance(texts, list) or any(
-            not isinstance(text, str) for text in texts
-        ):
-            raise TypeError("Expected list of strings")
-
-        return [self.embed_text(text) for text in texts]
-
+        # L2-normalization so dot product equals cosine similarity
+        norm = math.sqrt(sum(v * v for v in vector))
+        if norm > 0.0:
+            return [v / norm for v in vector]
+        return [0.0] * self._dimension
 
 def get_embedding_provider(
     provider_type: str = "sentence-transformers",
     model_name: str = "all-MiniLM-L6-v2",
 ) -> BaseEmbeddingProvider:
-    """Construct the configured embedding provider."""
-
-    normalized_type = provider_type.strip().lower()
-
-    if normalized_type == "sentence-transformers":
-        return SentenceTransformersEmbeddingProvider(model_name)
-
-    if normalized_type == "simulated":
+    """Factory helper to obtain the configured embedding provider."""
+    if provider_type == "sentence-transformers":
+        return SentenceTransformersEmbeddingProvider(
+            model_name=model_name
+        )
+    elif provider_type == "simulated":
         return SimulatedEmbeddingProvider()
-
-    raise ValueError(
-        f"Unknown embedding provider type: {provider_type}"
-    )
+    else:
+        raise ValueError(
+            f"Unknown embedding provider type: {provider_type}"
+        )

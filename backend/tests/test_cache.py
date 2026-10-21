@@ -170,3 +170,112 @@ def test_cosine_similarity():
 
     v3 = [0.0, 1.0, 0.0]
     assert pytest.approx(cosine_similarity(v1, v3)) == 0.0
+
+def test_semantic_similarity_diagnostic():
+    provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
+
+    queries = [
+        "What is semantic caching in large language models?",
+        "Explain how semantic caching works for LLMs.",
+        "How can a language model save computation by reusing answers from earlier similar questions?",
+    ]
+
+    vectors = provider.embed_batch(queries)
+
+    print("\n--- Semantic Similarity Diagnostic ---")
+    for i in range(len(queries)):
+        for j in range(i + 1, len(queries)):
+            score = cosine_similarity(vectors[i], vectors[j])
+            print(f"Similarity Q{i + 1} vs Q{j + 1}: {score:.4f}")
+
+    assert all(len(vector) == 384 for vector in vectors)
+
+
+# --- Phase 2: Cache Edge-Case Tests ---
+
+def test_cosine_similarity_edge_cases():
+    assert cosine_similarity([], []) == 0.0
+    assert cosine_similarity([1.0, 0.0], [1.0]) == 0.0
+    assert cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
+    assert cosine_similarity([float("nan")], [1.0]) == 0.0
+    assert cosine_similarity([float("inf")], [1.0]) == 0.0
+
+
+
+def test_cache_lru_eviction():
+    provider = SimulatedEmbeddingProvider(dimension=64)
+    cache = SemanticCache(
+        embedding_provider=provider,
+        max_entries=2,
+    )
+
+    cache.store("Query A", "Response A")
+    cache.store("Query B", "Response B")
+
+    # Explicitly update A's access time to make B the least recently used.
+    entry_a = next(
+        entry for entry in cache._entries.values()
+        if entry.query == "Query A"
+    )
+    entry_b = next(
+        entry for entry in cache._entries.values()
+        if entry.query == "Query B"
+    )
+
+    entry_a.last_accessed_at = 200.0
+    entry_b.last_accessed_at = 100.0
+
+    cache.store("Query C", "Response C")
+
+    assert len(cache._entries) == 2
+
+    cached_queries = {
+        entry.query for entry in cache._entries.values()
+    }
+
+    assert "Query A" in cached_queries
+    assert "Query C" in cached_queries
+    assert "Query B" not in cached_queries
+
+
+def test_clear_cache_and_stats():
+    provider = SimulatedEmbeddingProvider(dimension=64)
+    cache = SemanticCache(embedding_provider=provider)
+
+    cache.store("Test query", "Test response")
+
+    stats = cache.get_stats()
+    assert stats["total_entries"] == 1
+    assert stats["max_entries"] == cache.max_entries
+    assert stats["is_simulated"] is True
+
+    cache.clear()
+
+    assert len(cache._entries) == 0
+    assert cache.get_stats()["total_entries"] == 0
+
+
+def test_embedding_failure_during_store_and_lookup():
+    class FailingEmbeddingProvider(SimulatedEmbeddingProvider):
+        def embed_text(self, text):
+            raise RuntimeError("Simulated embedding failure")
+
+    provider = FailingEmbeddingProvider(dimension=64)
+    cache = SemanticCache(embedding_provider=provider)
+
+    # Storage should fail safely.
+    result = cache.store("Test query", "Test response")
+    assert result is None
+    assert len(cache._entries) == 0
+
+    # Lookup should return a miss without raising an exception.
+    # Add an entry with a working provider first.
+    working_provider = SimulatedEmbeddingProvider(dimension=64)
+    working_cache = SemanticCache(embedding_provider=working_provider)
+    working_cache.store("Existing query", "Existing response")
+
+    working_cache.embedding_provider = provider
+    lookup_result = working_cache.lookup("A new query")
+
+    assert lookup_result.is_hit is False
+    assert lookup_result.matched_entry is None
