@@ -1,5 +1,7 @@
-from typing import Optional, Dict, Any, List
+
+from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field
+
 
 class HealthResponse(BaseModel):
     status: str = "healthy"
@@ -7,12 +9,14 @@ class HealthResponse(BaseModel):
     simulated_mode: bool
     timestamp: str
 
+
 class QueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, description="User prompt or question to process")
+    query: str = Field(
+        ..., min_length=1,
+        description="User prompt or question to process"
+    )
     similarity_threshold: Optional[float] = Field(
-        default=None,
-        ge=0.0,
-        le=1.0,
+        default=None, ge=0.0, le=1.0,
         description="Override default similarity threshold for semantic cache matching"
     )
     force_refresh: bool = Field(
@@ -23,6 +27,7 @@ class QueryRequest(BaseModel):
         default=None,
         description="Optional client metadata (e.g. user ID, session ID)"
     )
+
 
 class QueryResponse(BaseModel):
     request_id: str
@@ -39,9 +44,10 @@ class QueryResponse(BaseModel):
     estimated_cost: float
     actual_cost: Optional[float] = Field(
         default=None,
-        description="Provider-reported cost. None in mock/development mode as no live billing APIs are called."
+        description="Provider-reported cost. None when actual billing data is unavailable."
     )
     timestamp: str
+
 
 class RequestRecord(BaseModel):
     request_id: str
@@ -61,6 +67,7 @@ class RequestRecord(BaseModel):
     has_error: bool = False
     error_message: Optional[str] = None
 
+
 class MetricsSummary(BaseModel):
     total_requests: int
     cache_hits: int
@@ -73,3 +80,5 @@ class MetricsSummary(BaseModel):
     routing_breakdown: Dict[str, int]
     cache_breakdown: Dict[str, int]
     is_simulated: bool = True
+    error_count: int = 0
+    error_rate: float = 0.0

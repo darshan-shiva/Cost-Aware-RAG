@@ -57,9 +57,8 @@ export interface MetricsSummary {
   p95_latency_ms: number;
   avg_latency_ms: number;
   routing_breakdown: Record<string, number>;
-  cache_breakdown: {
-    hits: number;
-    misses: number;
-  };
+  cache_breakdown: Record<string, number>;
   is_simulated: boolean;
+  error_count: number;
+  error_rate: number;
 }

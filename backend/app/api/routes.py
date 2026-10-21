@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from datetime import datetime, timezone
 from typing import List
-
+from fastapi import APIRouter, Depends, Query, Request
 from ..config import settings
 from ..schemas import HealthResponse, QueryRequest, QueryResponse, RequestRecord, MetricsSummary
 from ..services.query_service import QueryService
@@ -29,16 +29,19 @@ def health_check(
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
+
 @router.post("/api/query", response_model=QueryResponse, tags=["Query"])
 def process_query(
     request: QueryRequest,
+    http_request: Request,
     service: QueryService = Depends(get_query_service),
 ):
-    """
-    Process incoming query: checks semantic cache, routes to appropriate model tier if missed,
-    synthesizes mock response, and records metrics.
-    """
-    return service.process_query(request)
+    """Process a query and preserve its HTTP request ID in telemetry."""
+    return service.process_query(
+        request,
+        request_id=getattr(http_request.state, "request_id", None),
+    )
+
 
 @router.get("/api/metrics/summary", response_model=MetricsSummary, tags=["Metrics"])
 def get_metrics_summary(

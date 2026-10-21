@@ -29,7 +29,7 @@ def client():
 
     app.dependency_overrides[get_query_service] = lambda: test_service
     
-    with TestClient(app) as test_client:
+    with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
         
     app.dependency_overrides.clear()
@@ -120,3 +120,29 @@ def test_cache_bypass_via_force_refresh(client):
     assert res3.status_code == 200
     assert res3.json()["cache_hit"] is False
     assert res3.json()["estimated_cost"] > 0.0
+
+def test_llm_failure_is_recorded_in_metrics(client):
+    """A failed LLM generation increments error count and error rate."""
+    service = app.dependency_overrides[get_query_service]()
+
+    def raise_llm_error(query, model_id):
+        raise RuntimeError("Mocked provider failure")
+
+    service._generate_response = raise_llm_error
+
+    response = client.post(
+        "/api/query",
+        json={"query": "Trigger a controlled provider failure"},
+    )
+    # The API should return an error, not a successful answer.
+    assert response.status_code >= 400
+
+    # The failed request must be recorded in SQLite.
+    summary_response = client.get("/api/metrics/summary")
+    assert summary_response.status_code == 200
+
+    summary = summary_response.json()
+    assert summary["total_requests"] == 1
+    assert summary["cache_misses"] == 1
+    assert summary["error_count"] == 1
+    assert summary["error_rate"] == 1.0

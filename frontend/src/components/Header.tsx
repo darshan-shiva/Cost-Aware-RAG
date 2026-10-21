@@ -21,7 +21,7 @@ export const Header: React.FC<HeaderProps> = ({ health, isLoading, onRefresh, on
             <div className="flex items-center space-x-2">
               <h1 className="font-semibold text-slate-100 text-lg tracking-tight">Cost-Aware RAG</h1>
               <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">
-                Phase 2 Semantic Caching
+                Phase 5 Observability
               </span>
             </div>
 

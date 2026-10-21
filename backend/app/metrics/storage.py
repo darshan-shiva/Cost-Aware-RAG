@@ -135,12 +135,13 @@ class SQLiteMetricsStore:
             # Aggregate counts and spend
             cursor.execute(
                 """
-                SELECT 
-                    COUNT(*) as total_requests,
-                    SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) as cache_hits,
-                    SUM(CASE WHEN cache_hit = 0 THEN 1 ELSE 0 END) as cache_misses,
-                    COALESCE(SUM(estimated_cost), 0.0) as total_estimated_spend,
-                    COALESCE(AVG(latency_ms), 0.0) as avg_latency_ms
+                SELECT
+                    COUNT(*) AS total_requests,
+                    SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) AS cache_hits,
+                    SUM(CASE WHEN cache_hit = 0 THEN 1 ELSE 0 END) AS cache_misses,
+                    SUM(CASE WHEN has_error = 1 THEN 1 ELSE 0 END) AS error_count,
+                    COALESCE(SUM(estimated_cost), 0.0) AS total_estimated_spend,
+                    COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms
                 FROM request_records;
                 """
             )
@@ -148,6 +149,10 @@ class SQLiteMetricsStore:
             total_requests = agg["total_requests"] or 0
             cache_hits = agg["cache_hits"] or 0
             cache_misses = agg["cache_misses"] or 0
+            error_count = agg["error_count"] or 0
+            error_rate = round(
+                error_count / total_requests, 4
+            ) if total_requests > 0 else 0.0
             total_estimated_spend = round(agg["total_estimated_spend"] or 0.0, 6)
             avg_latency_ms = round(agg["avg_latency_ms"] or 0.0, 2)
             cache_hit_rate = round(cache_hits / total_requests, 4) if total_requests > 0 else 0.0
@@ -192,8 +197,15 @@ class SQLiteMetricsStore:
                 p95_latency_ms=round(p95_latency_ms, 2),
                 avg_latency_ms=avg_latency_ms,
                 routing_breakdown=routing_breakdown,
+                error_count=error_count,
+                error_rate=error_rate,
                 cache_breakdown={"hits": cache_hits, "misses": cache_misses},
-                is_simulated=True,
+                is_simulated=any(
+                    bool(row["is_cache_simulated"])
+                    for row in cursor.execute(
+                        "SELECT is_cache_simulated FROM request_records"
+                    ).fetchall()
+                ),
             )
 
     def clear(self) -> None:

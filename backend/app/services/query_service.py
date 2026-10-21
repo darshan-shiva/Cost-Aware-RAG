@@ -3,9 +3,9 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-
+import logging
+logger = logging.getLogger("cost_aware_rag.service")
 from groq import Groq
-
 from ..config import settings
 from ..schemas import QueryRequest, QueryResponse, RequestRecord
 from ..cache import SemanticCache, CacheLookupResult, get_embedding_provider
@@ -104,9 +104,13 @@ class QueryService:
 
         return response_text, input_tokens, output_tokens
 
-    def process_query(self, req: QueryRequest) -> QueryResponse:
+    def process_query(
+            self,
+            req: QueryRequest,
+            request_id: Optional[str] = None,
+        ) -> QueryResponse:
         start_time = time.perf_counter()
-        request_id = str(uuid.uuid4())
+        request_id = request_id or str(uuid.uuid4())
         now_iso = datetime.now(timezone.utc).isoformat()
 
         cache_result = CacheLookupResult(is_hit=False)
@@ -154,6 +158,15 @@ class QueryService:
                 has_error=False,
             )
             self.metrics_store.record_request(record)
+            logger.info(
+                "query_completed",
+                extra={
+                    "request_id": request_id,
+                    "cache_hit": True,
+                    "selected_model": model_used,
+                    "latency_ms": total_latency_ms,
+                },
+            )
 
             return QueryResponse(
                 request_id=request_id,
@@ -209,6 +222,18 @@ class QueryService:
                 error_message=str(exc)[:500],
             )
             self.metrics_store.record_request(error_record)
+
+            logger.error(
+                "query_failed",
+                extra={
+                    "request_id": request_id,
+                    "cache_hit": False,
+                    "selected_model": selected_model.model_id,
+                    "latency_ms": total_latency_ms,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
             raise
 
         total_latency_ms = round(

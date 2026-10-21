@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Database, Zap, DollarSign, Timer, BarChart3 } from 'lucide-react';
+import { Database, Zap, DollarSign, Timer, CircleAlert } from 'lucide-react';
 import { Header } from './components/Header';
 import { MetricCard } from './components/MetricCard';
 import { QueryRunner } from './components/QueryRunner';
 import { ChartsSection } from './components/ChartsSection';
 import { RequestHistoryTable } from './components/RequestHistoryTable';
-import { SimulatedBanner } from './components/SimulatedBanner';
+
 import {
   fetchHealth,
   fetchMetricsSummary,
@@ -86,11 +86,7 @@ export function App() {
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        {/* Architecture Simulation Notice */}
-        <SimulatedBanner />
-
-        {/* Primary Metric KPI Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
           <MetricCard
             title="Total Requests"
             value={metrics?.total_requests ?? 0}
@@ -140,6 +136,13 @@ export function App() {
             }
             icon={<Timer className="w-5 h-5 text-purple-400" />}
           />
+          <MetricCard
+            title="Error Rate"
+            value={`${((metrics?.error_rate ?? 0) * 100).toFixed(2)}%`}
+            subValue={`${metrics?.error_count ?? 0} failed requests`}
+            icon={<CircleAlert className="w-5 h-5 text-rose-400" />}
+          />
+
         </div>
 
         {/* Interactive Query Runner */}
@@ -153,7 +156,7 @@ export function App() {
       </main>
 
       <footer className="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs text-slate-400 font-mono">
-        Cost-Aware RAG Engine • Phase 1 Foundation • Semantic Caching & Model Routing
+        Cost-Aware RAG Engine • Phase 5 Observability • Semantic Caching & Model Routing
       </footer>
     </div>
   );
