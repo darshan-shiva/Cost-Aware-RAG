@@ -1,162 +1,227 @@
+
 # Cost-Aware RAG: Semantic Caching & Intelligent Model Routing
 
-**Phase 2 — Real Semantic Caching with Dense Local Embeddings**
+A cost-aware AI infrastructure project that reduces repeated LLM inference through semantic caching and routes queries to different model tiers based on estimated complexity. It combines local sentence embeddings, Groq-hosted LLM inference, SQLite telemetry, and an interactive React dashboard.
 
-A portfolio-grade AI infrastructure system designed to reduce LLM inference costs and response latencies through **genuine embedding-based semantic caching** and **complexity-based model routing**, coupled with a real-time observability telemetry dashboard.
+## Project Status
 
----
+**Completed through Phase 3: Real LLM Integration & Intelligent Routing**
 
-## Architecture Overview
+- **Phase 1 — Foundation:** Backend API, frontend dashboard, and SQLite telemetry.
+- **Phase 2 — Real Semantic Caching:** Local `all-MiniLM-L6-v2` embeddings, cosine-similarity matching, persistent cache storage, and cache statistics.
+- **Phase 3 — Real LLM Integration & Intelligent Routing:** Groq API integration, lightweight and complex model tiers, real response generation, token usage tracking, and estimated inference costs.
 
+Upcoming phases cover cache quality evaluation, performance analysis, production-grade observability, reliability and security, and final deployment.
+
+## Features
+
+### 1. Semantic Caching
+
+- Local embeddings using Sentence Transformers (`all-MiniLM-L6-v2`).
+- Cosine-similarity matching with a configurable threshold.
+- SQLite-backed cache persistence.
+- Cache bypass through force refresh.
+- Cache hits reuse stored responses and avoid another LLM generation call.
+
+### 2. Intelligent Model Routing
+
+- Rule-based query complexity assessment.
+- Lightweight routing for direct, straightforward questions.
+- Complex-model routing for analytical and multi-step questions.
+- Routing reasons recorded for observability.
+
+**Configured model tiers:**
+
+| Tier | Model | Intended use |
+|---|---|---|
+| Lightweight | `openai/gpt-oss-20b` | Direct questions and simpler requests |
+| Complex | `openai/gpt-oss-120b` | Analytical queries and more involved reasoning |
+
+Models are accessed through Groq. Model availability and rate limits depend on the provider account.
+
+### 3. LLM Inference & Cost Estimation
+
+- Real model-generated responses on cache misses.
+- Provider-reported input and output token usage.
+- Estimated inference costs calculated from configurable per-token rates.
+- Cache hits recorded with zero additional LLM inference cost.
+- Failed generation requests recorded in telemetry.
+
+**Cost note:** Displayed costs are estimates based on configured rates. They are not verified provider billing amounts. `actual_cost` remains unavailable unless a verified source for actual charges is integrated.
+
+### 4. Observability Dashboard
+
+- Total request count.
+- Cache hit rate and cache outcomes.
+- Estimated LLM spend.
+- Request latency statistics.
+- Model selection and routing reasons.
+- Interactive query runner with cache threshold and force-refresh controls.
+
+## Architecture
+
+```text
+User Query
+    |
+    v
+React + Vite Dashboard
+    |
+    v
+FastAPI Backend
+    |
+    v
+Semantic Cache Lookup
+    |
+    +---- Cache Hit ----> Return Stored Response
+    |                    No LLM Generation
+    |
+    +---- Cache Miss ---> Complexity-Based Router
+                              |
+                              +--> Lightweight Groq Model
+                              |
+                              +--> Complex Groq Model
+                                      |
+                                      v
+                                Generated Response
+                                      |
+                                      v
+                                Store in Cache
+                                      |
+                                      v
+                             SQLite Request Telemetry
 ```
-                                      +------------------------+
-                                      |   Client / Frontend    |
-                                      | (React + Vite + Recharts)|
-                                      +-----------+------------+
-                                                  |
-                                           POST /api/query
-                                                  v
-                                      +------------------------+
-                                      |      FastAPI App       |
-                                      +-----------+------------+
-                                                  |
-                                                  v
-                                      +------------------------+
-                                      | SentenceTransformers   |
-                                      |   (all-MiniLM-L6-v2)   |
-                                      |    (384-dim Vectors)   |
-                                      +-----------+------------+
-                                                  |
-                                                  v
-                                      +------------------------+
-                                      | Persistent Cache       |
-                                      | (Cosine Similarity)    |
-                                      | (SQLite + RAM Index)   |
-                                      +-----+------------+-----+
-                                            |            |
-                                       Hit  |            |  Miss
-                           (Latency ~1-3ms) |            |
-                           (Cost: $0.00000) |            v
-                                            |   +------------------------+
-                                            |   |   Cost-Aware Router    |
-                                            |   | (Complexity Heuristics)|
-                                            |   +-----+------------+-----+
-                                            |         |            |
-                                            |    Low  |            |  High
-                                            |         v            v
-                                            |   [Lightweight]  [Frontier]
-                                            |   (llama-3.1-8b)  (gpt-4o)
-                                            |         |            |
-                                            |         +-----+------+
-                                            |               |
-                                            +-------+-------+
-                                                    |
-                                                    v
-                                      +------------------------+
-                                      | SQLite Telemetry Store |
-                                      |  (p50/p95, Spend, Logs)|
-                                      +------------------------+
-```
 
----
+## Technology Stack
 
-## Phase 2 Implementation Highlights
+**Backend**
+- Python
+- FastAPI
+- Pydantic Settings
+- Groq Python SDK
+- Sentence Transformers
+- PyTorch
+- SQLite
+- Pytest
 
-1. **Genuine Dense Semantic Embeddings (`SentenceTransformersEmbeddingProvider`)**:
-   - Model: `sentence-transformers/all-MiniLM-L6-v2` (384-dimensional dense vectors).
-   - Loaded once via singleton caching and reused across requests for high throughput and zero cold-start penalty per query.
-   - Normalized unit vectors (`normalize_embeddings=True`), allowing exact cosine similarity calculation via dot product.
-   - Robust error handling for empty queries, model loading errors, and Windows runtime isolation.
+**Frontend**
+- React
+- TypeScript
+- Vite
+- Tailwind CSS
+- Recharts
+- Lucide React
 
-2. **Persistent Semantic Cache (`SemanticCache`)**:
-   - In-memory vector index backed by SQLite table `cache_entries`.
-   - Persists query strings, responses, 384-dimensional embeddings (JSON format), timestamps, and hit counts across server restarts.
-   - Enforces configurable maximum entries (`CACHE_MAX_ENTRIES`) with LRU eviction.
-   - Bypassed on forced refresh requests (`force_refresh: true`).
-   - Rejects empty queries or empty model responses.
-
-3. **Cost-Aware Routing Engine (`CostAwareRouter`)**:
-   - Evaluates query complexity (analytical keywords, token length, structured context).
-   - Routes to **Lightweight Tier** (`llama-3.1-8b-instruct`) or **Frontier Tier** (`gpt-4o`).
-   - Supplies human-readable routing rationale with every execution.
-   - Transparent cost calculation: Cache hits incur **$0.000000** LLM spend; cache misses calculate input/output token costs based on model tier.
-
-4. **Telemetry & Observability Dashboard (`React` + `TypeScript` + `Recharts`)**:
-   - Live metrics: Total requests, cache hit rate, estimated LLM spend, and rank-ordered p50/p95 latencies.
-   - Interactive pipeline runner to test semantic paraphrases and cache hits with real-time feedback.
-   - Recharts visual breakdowns for Cache Outcomes and Model Distribution.
-   - Audit trail table with expandable execution metadata and similarity scores.
-
----
-
-## Quickstart
+## Getting Started
 
 ### Prerequisites
-- Python 3.10+
-- Node.js 18+ and npm
 
-### 1. Backend Setup
+- Python 3.11 or a compatible supported Python version.
+- Node.js and npm.
+- A Groq API key.
+- Git.
+
+### 1. Clone the repository
 
 ```bash
-# Navigate to backend directory
-cd backend
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run backend test suite (18 automated tests)
-python -m pytest tests -v
-
-# Start FastAPI development server
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+git clone https://github.com/darshan-shiva/Cost-Aware-RAG.git
+cd Cost-Aware-RAG
 ```
 
-The backend API will be live at `http://127.0.0.1:8000`. Interactive OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
-
-### 2. Frontend Setup
-
-In a separate terminal:
+### 2. Set up the backend
 
 ```bash
-# Navigate to frontend directory
+cd backend
+python -m venv .venv
+```
+
+Activate the environment on Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Configure environment variables
+
+Create a local `.env` file in the backend directory. Configure the variables expected by `app/config.py`, including your provider, API key, and model IDs.
+
+Example:
+
+```dotenv
+RAG_LLM_PROVIDER=groq
+RAG_GROQ_API_KEY=your_groq_api_key_here
+RAG_LIGHTWEIGHT_MODEL_ID=openai/gpt-oss-20b
+RAG_COMPLEX_MODEL_ID=openai/gpt-oss-120b
+RAG_LLM_MAX_COMPLETION_TOKENS=2048
+```
+
+Never commit `.env` or expose your API key publicly.
+
+### 4. Start the backend
+
+From the `backend` directory:
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+The API documentation is available at:
+
+`http://127.0.0.1:8000/docs`
+
+### 5. Start the frontend
+
+Open a second terminal:
+
+```bash
 cd frontend
-
-# Install dependencies
 npm install
-
-# Start Vite development server
 npm run dev
 ```
 
-The dashboard will be accessible at `http://localhost:5173`.
+Open the local URL printed by Vite, typically:
 
----
+`http://localhost:5173`
 
-## Configuration & Environment Variables
+## Testing
 
-Settings can be customized via environment variables with the `RAG_` prefix:
+Run the backend tests from the `backend` directory:
 
-| Variable | Default | Description |
-|---|---|---|
-| `RAG_EMBEDDING_PROVIDER` | `sentence-transformers` | Embedding provider (`sentence-transformers` or `simulated`) |
-| `RAG_EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | SentenceTransformers model identifier |
-| `RAG_SIMILARITY_THRESHOLD` | `0.82` | Cosine similarity threshold for semantic cache hits |
-| `RAG_CACHE_MAX_ENTRIES` | `1000` | Maximum entries before LRU eviction |
-| `RAG_LIGHTWEIGHT_MODEL_ID` | `llama-3.1-8b-instruct` | Model identifier for low-complexity queries |
-| `RAG_COMPLEX_MODEL_ID` | `gpt-4o` | Model identifier for high-complexity queries |
-| `RAG_DATABASE_PATH` | `./metrics.db` | SQLite database file location |
+```bash
+python -m pytest -q
+```
 
----
+Tests should use mocks for external LLM calls so the test suite does not require a live API key or incur inference costs. The project has previously collected 33 tests, and the semantic cache test file passed 14 tests during Phase 3 verification.
 
-## Phase 2 Verification & Test Coverage
+## Current Limitations
 
-All 18 automated tests pass across unit and integration levels:
-- `test_real_embedding_provider_properties`: 384-dimensional dense vectors, unit norm, non-simulated flag.
-- `test_real_embedding_batch`: Batch embedding consistency.
-- `test_real_semantic_paraphrase_hit`: Dense vector semantic matching for paraphrases.
-- `test_real_semantic_unrelated_query_miss`: Unrelated queries yield low similarity (<0.40) and miss.
-- `test_threshold_sensitivity`: Dynamic threshold adjustment switches between hit and miss.
-- `test_cache_persistence_across_restarts`: Cache entries survive server restarts via SQLite.
-- `test_empty_input_and_invalid_storage`: Empty queries and responses handled safely without crashes.
-- `test_cache_bypass_via_force_refresh`: `force_refresh=True` bypasses cache for fresh generation.
-- `test_health_check` & `test_query_flow_cache_miss_then_hit`: Full API contracts and telemetry persistence.
+- Routing is rule-based rather than driven by a trained complexity classifier.
+- Estimated costs depend on configured token prices and may differ from actual provider billing.
+- No retrieval corpus or document-ingestion pipeline is documented as implemented here; the current focus is semantic response caching and model routing.
+- Cache quality, false-positive matching, and performance benchmarks are planned for the next phase.
+- Production authentication, rate limiting, and deployment hardening remain future work.
+
+## Roadmap
+
+- [x] Phase 1 — Foundation
+- [x] Phase 2 — Real Semantic Caching
+- [x] Phase 3 — Real LLM Integration & Intelligent Routing
+- [ ] Phase 4 — Cache Quality & Performance Evaluation
+- [ ] Phase 5 — Production-Grade Observability
+- [ ] Phase 6 — Reliability, Security & Scalability
+- [ ] Phase 7 — Final Dashboard & Deployment
+
+## Security
+
+- Keep API keys in environment variables.
+- Do not commit `.env`, virtual environments, or local database files.
+- Avoid including secrets in logs, screenshots, or public issue reports.
+
+## License
+
+Add a license file if you intend to distribute this project under an open-source license.
