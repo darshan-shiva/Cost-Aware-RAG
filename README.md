@@ -1,17 +1,18 @@
-
 # Cost-Aware RAG: Semantic Caching & Intelligent Model Routing
 
-A cost-aware AI infrastructure project that reduces repeated LLM inference through semantic caching and routes queries to different model tiers based on estimated complexity. It combines local sentence embeddings, Groq-hosted LLM inference, SQLite telemetry, and an interactive React dashboard.
+A cost-aware AI infrastructure project that reduces repeated LLM inference through semantic caching and routes queries to different model tiers based on estimated complexity. It combines local sentence embeddings, Groq-hosted LLM inference, SQLite telemetry, structured logging, and an interactive React dashboard.
 
 ## Project Status
 
-**Completed through Phase 4: Cache Quality & Performance Evaluation**
+**Completed through Phase 5: Production-Grade Observability**
 
 - **Phase 1 — Foundation:** Backend API, frontend dashboard, and SQLite telemetry.
 - **Phase 2 — Real Semantic Caching:** Local `all-MiniLM-L6-v2` embeddings, cosine-similarity matching, persistent cache storage, and cache statistics.
 - **Phase 3 — Real LLM Integration & Intelligent Routing:** Groq API integration, lightweight and complex model tiers, real response generation, token usage tracking, and estimated inference costs.
+- **Phase 4 — Cache Quality & Performance Evaluation:** Semantic similarity evaluation, cache lookup benchmarking, and illustrative cost-savings projections.
+- **Phase 5 — Production-Grade Observability:** Structured request logging, error telemetry, latency statistics, and an enhanced dashboard with real-time metrics.
 
-Upcoming phases cover production-grade observability, reliability and security, and final deployment.
+Upcoming phases focus on reliability, security, scalability, and final deployment.
 
 ## Features
 
@@ -22,6 +23,7 @@ Upcoming phases cover production-grade observability, reliability and security, 
 - SQLite-backed cache persistence.
 - Cache bypass through force refresh.
 - Cache hits reuse stored responses and avoid another LLM generation call.
+- Cache lookup performance evaluation using real embeddings.
 
 ### 2. Intelligent Model Routing
 
@@ -49,14 +51,27 @@ Models are accessed through Groq. Model availability and rate limits depend on t
 
 **Cost note:** Displayed costs are estimates based on configured rates. They are not verified provider billing amounts. `actual_cost` remains unavailable unless a verified source for actual charges is integrated.
 
-### 4. Observability Dashboard
+### 4. Production Observability
+
+- **Structured logging:** Captures HTTP request details, response status codes, request IDs, and request latency.
+- **Request-level telemetry:** Stores query execution records, cache outcomes, selected models, token usage, estimated costs, and errors in SQLite.
+- **Performance monitoring:** Tracks request volume, cache hit rate, average latency, p50 latency, and p95 latency.
+- **Error monitoring:** Records failed requests and exposes error counts and error rates.
+- **Routing visibility:** Tracks model selection and routing reasons.
+- **Health monitoring:** Provides an API endpoint for application health and embedding-provider simulation status.
+- **Automatic dashboard refresh:** Refreshes metrics periodically and after query execution.
+- **Request history:** Displays recent request records for inspection and debugging.
+
+### 5. Interactive Dashboard
 
 - Total request count.
 - Cache hit rate and cache outcomes.
 - Estimated LLM spend.
-- Request latency statistics.
-- Model selection and routing reasons.
-- Interactive query runner with cache threshold and force-refresh controls.
+- Latency statistics (p50, p95, and average).
+- Error rate and failed request count.
+- Model routing distribution and request history.
+- Interactive query runner with similarity-threshold and force-refresh controls.
+- Manual refresh and local metrics/cache reset controls.
 
 ## Architecture
 
@@ -68,6 +83,8 @@ React + Vite Dashboard
     |
     v
 FastAPI Backend
+    |
+    +---- Structured Request Logging
     |
     v
 Semantic Cache Lookup
@@ -82,18 +99,22 @@ Semantic Cache Lookup
                               +--> Complex Groq Model
                                       |
                                       v
-                                Generated Response
+                                 Generated Response
                                       |
                                       v
-                                Store in Cache
+                                 Store in Cache
                                       |
                                       v
-                             SQLite Request Telemetry
+                              SQLite Request Telemetry
+                                      |
+                                      v
+                              Metrics API & Dashboard
 ```
 
 ## Technology Stack
 
 **Backend**
+
 - Python
 - FastAPI
 - Pydantic Settings
@@ -101,9 +122,11 @@ Semantic Cache Lookup
 - Sentence Transformers
 - PyTorch
 - SQLite
+- Python logging
 - Pytest
 
 **Frontend**
+
 - React
 - TypeScript
 - Vite
@@ -188,6 +211,18 @@ Open the local URL printed by Vite, typically:
 
 `http://localhost:5173`
 
+## Observability API
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/health` | GET | Application health and embedding-provider status |
+| `/api/query` | POST | Process a query through caching and model routing |
+| `/api/metrics/summary` | GET | Aggregate request, cache, latency, error, and estimated-cost metrics |
+| `/api/metrics/requests` | GET | Retrieve recent request telemetry |
+| `/api/metrics/reset` | POST | Clear local metrics and semantic cache |
+
+The metrics endpoints expose operational telemetry to the dashboard. The reset endpoint clears local metrics and cache data; use it carefully.
+
 ## Testing
 
 Run the backend tests from the `backend` directory:
@@ -196,7 +231,17 @@ Run the backend tests from the `backend` directory:
 python -m pytest -q
 ```
 
-Tests should use mocks for external LLM calls so the test suite does not require a live API key or incur inference costs. The project has previously collected 33 tests, and the semantic cache test file passed 14 tests during Phase 3 verification.
+The test suite covers API behavior, semantic cache interactions, model routing, cost estimation, and error telemetry.
+
+Tests for external LLM failures should mock provider errors so they can validate failure handling without depending on a live provider failure. Tests that invoke real inference require valid provider credentials and may incur usage costs.
+
+The frontend production build can be checked from the `frontend` directory:
+
+```bash
+npm run build
+```
+
+A successful build confirms that TypeScript checking and Vite production bundling complete without errors.
 
 ## Cache Evaluation and Cost Analysis
 
@@ -256,6 +301,7 @@ This is a projection, not measured production savings. It assumes cache hits avo
 - No retrieval corpus or document-ingestion pipeline is documented as implemented here; the current focus is semantic response caching and model routing.
 - Cache evaluation currently uses a small manually labelled benchmark; broader testing is needed before changing the production similarity threshold.
 - Production authentication, rate limiting, and deployment hardening remain future work.
+- Observability currently focuses on application-level telemetry; external monitoring integrations and alerting have not been documented as implemented.
 
 ## Roadmap
 
@@ -263,7 +309,7 @@ This is a projection, not measured production savings. It assumes cache hits avo
 - [x] Phase 2 — Real Semantic Caching
 - [x] Phase 3 — Real LLM Integration & Intelligent Routing
 - [x] Phase 4 — Cache Quality & Performance Evaluation
-- [ ] Phase 5 — Production-Grade Observability
+- [x] Phase 5 — Production-Grade Observability
 - [ ] Phase 6 — Reliability, Security & Scalability
 - [ ] Phase 7 — Final Dashboard & Deployment
 
@@ -272,6 +318,8 @@ This is a projection, not measured production savings. It assumes cache hits avo
 - Keep API keys in environment variables.
 - Do not commit `.env`, virtual environments, or local database files.
 - Avoid including secrets in logs, screenshots, or public issue reports.
+- Restrict CORS origins and configure authentication before exposing the service publicly.
+- Treat request queries and response previews as potentially sensitive data when retaining telemetry.
 
 ## License
 
