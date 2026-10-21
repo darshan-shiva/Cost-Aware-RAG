@@ -5,13 +5,13 @@ A cost-aware AI infrastructure project that reduces repeated LLM inference throu
 
 ## Project Status
 
-**Completed through Phase 3: Real LLM Integration & Intelligent Routing**
+**Completed through Phase 4: Cache Quality & Performance Evaluation**
 
 - **Phase 1 — Foundation:** Backend API, frontend dashboard, and SQLite telemetry.
 - **Phase 2 — Real Semantic Caching:** Local `all-MiniLM-L6-v2` embeddings, cosine-similarity matching, persistent cache storage, and cache statistics.
 - **Phase 3 — Real LLM Integration & Intelligent Routing:** Groq API integration, lightweight and complex model tiers, real response generation, token usage tracking, and estimated inference costs.
 
-Upcoming phases cover cache quality evaluation, performance analysis, production-grade observability, reliability and security, and final deployment.
+Upcoming phases cover production-grade observability, reliability and security, and final deployment.
 
 ## Features
 
@@ -198,12 +198,63 @@ python -m pytest -q
 
 Tests should use mocks for external LLM calls so the test suite does not require a live API key or incur inference costs. The project has previously collected 33 tests, and the semantic cache test file passed 14 tests during Phase 3 verification.
 
+## Cache Evaluation and Cost Analysis
+
+### Semantic Similarity Evaluation
+
+The semantic cache was evaluated using a small, manually labelled benchmark of 16 paraphrase pairs and 8 unrelated-query pairs with `sentence-transformers/all-MiniLM-L6-v2`.
+
+- Mean paraphrase similarity: **0.733**
+- Mean unrelated-query similarity: **0.025**
+
+| Similarity threshold | Precision | Recall | F1 score |
+|---:|---:|---:|---:|
+| 0.70 | 1.000 | 0.625 | 0.769 |
+| 0.82 | 1.000 | 0.250 | 0.400 |
+
+On this benchmark, threshold `0.70` produced the best F1 score among the tested thresholds. The production threshold remains `0.82` until a larger benchmark can better assess the risk of false-positive cache matches. The small number of unrelated examples is not sufficient to establish that false positives will not occur in production.
+
+### Cache Lookup Performance
+
+The local in-memory benchmark used 3 warm-up runs and 20 measured runs per query type.
+
+| Query type | Observed hits | Mean lookup latency | Median lookup latency |
+|---|---:|---:|---:|
+| Exact query | 20/20 | 20.792 ms | 19.871 ms |
+| Paraphrased query | 0/20 | 17.815 ms | 17.701 ms |
+| Unrelated query | 0/20 | 15.659 ms | 15.403 ms |
+
+These timings include query embedding and cache lookup. They do not represent end-to-end request latency or production performance.
+
+### Illustrative Cost-Savings Analysis
+
+The cost benchmark models 1,000 queries, an average of 150 input tokens and 300 output tokens per uncached query, and a 70% lightweight / 30% complex model-routing mix.
+
+The configured estimated costs per uncached query were approximately `$0.000101` for the lightweight tier and `$0.000202` for the complex tier. Under these assumptions, baseline estimated generation spend is **$0.131625 per 1,000 queries**.
+
+| Assumed cache hit rate | Estimated remaining spend | Estimated savings | Savings rate |
+|---:|---:|---:|---:|
+| 10% | $0.118462 | $0.013163 | 10% |
+| 25% | $0.098719 | $0.032906 | 25% |
+| 40% | $0.078975 | $0.052650 | 40% |
+| 60% | $0.052650 | $0.078975 | 60% |
+| 80% | $0.026325 | $0.105300 | 80% |
+
+This is a projection, not measured production savings. It assumes cache hits avoid all LLM generation charges and excludes embedding, storage, and infrastructure costs. Configured prices may differ from actual provider billing.
+
+### Evaluation Limitations
+
+- The semantic benchmark is small and manually labelled; results may not generalize to real traffic.
+- The cost benchmark uses illustrative query volume, token usage, and routing distribution.
+- Local cache lookup timings may differ in production and exclude end-to-end request latency.
+- The benchmark scripts use an in-memory cache and do not modify production cache data or make LLM inference calls.
+
 ## Current Limitations
 
 - Routing is rule-based rather than driven by a trained complexity classifier.
 - Estimated costs depend on configured token prices and may differ from actual provider billing.
 - No retrieval corpus or document-ingestion pipeline is documented as implemented here; the current focus is semantic response caching and model routing.
-- Cache quality, false-positive matching, and performance benchmarks are planned for the next phase.
+- Cache evaluation currently uses a small manually labelled benchmark; broader testing is needed before changing the production similarity threshold.
 - Production authentication, rate limiting, and deployment hardening remain future work.
 
 ## Roadmap
@@ -211,7 +262,7 @@ Tests should use mocks for external LLM calls so the test suite does not require
 - [x] Phase 1 — Foundation
 - [x] Phase 2 — Real Semantic Caching
 - [x] Phase 3 — Real LLM Integration & Intelligent Routing
-- [ ] Phase 4 — Cache Quality & Performance Evaluation
+- [x] Phase 4 — Cache Quality & Performance Evaluation
 - [ ] Phase 5 — Production-Grade Observability
 - [ ] Phase 6 — Reliability, Security & Scalability
 - [ ] Phase 7 — Final Dashboard & Deployment
