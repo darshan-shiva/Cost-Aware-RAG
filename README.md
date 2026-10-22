@@ -4,15 +4,16 @@ A cost-aware AI infrastructure project that reduces repeated LLM inference throu
 
 ## Project Status
 
-**Completed through Phase 5: Production-Grade Observability**
+**Completed through Phase 6: Security, Reliability & Scalability**
 
 - **Phase 1 — Foundation:** Backend API, frontend dashboard, and SQLite telemetry.
 - **Phase 2 — Real Semantic Caching:** Local `all-MiniLM-L6-v2` embeddings, cosine-similarity matching, persistent cache storage, and cache statistics.
 - **Phase 3 — Real LLM Integration & Intelligent Routing:** Groq API integration, lightweight and complex model tiers, real response generation, token usage tracking, and estimated inference costs.
 - **Phase 4 — Cache Quality & Performance Evaluation:** Semantic similarity evaluation, cache lookup benchmarking, and illustrative cost-savings projections.
 - **Phase 5 — Production-Grade Observability:** Structured request logging, error telemetry, latency statistics, and an enhanced dashboard with real-time metrics.
+- **Phase 6 — Security, Reliability & Scalability:** Configurable CORS origins, query and metadata validation, SlowAPI rate limiting, safe provider-error responses, timeout/retry configuration, structured request logging, and expanded reliability tests.
 
-Upcoming phases focus on reliability, security, scalability, and final deployment.
+Phase 7 focuses on final dashboard improvements and deployment.
 
 ## Features
 
@@ -123,6 +124,7 @@ Semantic Cache Lookup
 - PyTorch
 - SQLite
 - Python logging
+- SlowAPI
 - Pytest
 
 **Frontend**
@@ -231,7 +233,7 @@ Run the backend tests from the `backend` directory:
 python -m pytest -q
 ```
 
-The test suite covers API behavior, semantic cache interactions, model routing, cost estimation, and error telemetry.
+The backend test suite currently has 40 passing tests. It covers API behavior, semantic cache interactions, model routing, cost estimation, query and metadata validation, rate limiting (including HTTP 429), provider failure handling, timeout exception handling, and error telemetry.
 
 Tests for external LLM failures should mock provider errors so they can validate failure handling without depending on a live provider failure. Tests that invoke real inference require valid provider credentials and may incur usage costs.
 
@@ -300,7 +302,7 @@ This is a projection, not measured production savings. It assumes cache hits avo
 - Estimated costs depend on configured token prices and may differ from actual provider billing.
 - No retrieval corpus or document-ingestion pipeline is documented as implemented here; the current focus is semantic response caching and model routing.
 - Cache evaluation currently uses a small manually labelled benchmark; broader testing is needed before changing the production similarity threshold.
-- Production authentication, rate limiting, and deployment hardening remain future work.
+- Production authentication is not implemented. Before public deployment, review trusted proxy/client-IP configuration, validate CORS origins for the deployed frontend, and complete deployment-specific hardening.
 - Observability currently focuses on application-level telemetry; external monitoring integrations and alerting have not been documented as implemented.
 
 ## Roadmap
@@ -310,7 +312,7 @@ This is a projection, not measured production savings. It assumes cache hits avo
 - [x] Phase 3 — Real LLM Integration & Intelligent Routing
 - [x] Phase 4 — Cache Quality & Performance Evaluation
 - [x] Phase 5 — Production-Grade Observability
-- [ ] Phase 6 — Reliability, Security & Scalability
+- [x] Phase 6 — Reliability, Security & Scalability
 - [ ] Phase 7 — Final Dashboard & Deployment
 
 ## Security
@@ -318,7 +320,8 @@ This is a projection, not measured production savings. It assumes cache hits avo
 - Keep API keys in environment variables.
 - Do not commit `.env`, virtual environments, or local database files.
 - Avoid including secrets in logs, screenshots, or public issue reports.
-- Restrict CORS origins and configure authentication before exposing the service publicly.
+- Configure CORS origins for the intended frontend and configure authentication before exposing the service publicly.
+- The query endpoint is configured for 30 requests per minute; verify proxy/client-IP handling and deployment-specific rate-limit behavior before public exposure.
 - Treat request queries and response previews as potentially sensitive data when retaining telemetry.
 
 ## License
