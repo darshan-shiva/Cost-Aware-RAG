@@ -216,3 +216,52 @@ def test_query_rejects_oversized_metadata():
     )
 
     assert response.status_code == 422
+def test_query_rate_limit_returns_429(client):
+    from app.rate_limit import limiter
+
+    service = app.dependency_overrides[get_query_service]()
+
+    # Avoid real Groq calls during this test.
+    service._generate_response = lambda query, model_id: (
+        "Mocked response",
+        10,
+        5,
+    )
+
+    limiter.reset()
+
+    try:
+        statuses = []
+        for _ in range(31):
+            response = client.post(
+                "/api/query",
+                json={"query": "Rate limit verification test"},
+            )
+            statuses.append(response.status_code)
+
+        assert statuses[:30] == [200] * 30
+        assert statuses[30] == 429
+    finally:
+        limiter.reset()
+
+def test_provider_timeout_returns_safe_502(client):
+    import httpx
+
+    service = app.dependency_overrides[get_query_service]()
+
+    def simulate_timeout(query, model_id):
+        raise httpx.TimeoutException("Internal timeout details")
+
+    service._generate_response = simulate_timeout
+
+    response = client.post(
+        "/api/query",
+        json={"query": "Test provider timeout handling"},
+    )
+
+    assert response.status_code == 502
+    assert "Internal timeout details" not in response.text
+    assert "provider failed" in response.json()["detail"].lower()
+
+    summary = client.get("/api/metrics/summary").json()
+    assert summary["error_count"] == 1
