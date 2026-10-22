@@ -1,5 +1,6 @@
 
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -11,6 +12,7 @@ from ..schemas import QueryRequest, QueryResponse, RequestRecord
 from ..cache import SemanticCache, CacheLookupResult, get_embedding_provider
 from ..routing import CostAwareRouter
 from ..metrics import SQLiteMetricsStore
+from fastapi import HTTPException
 
 
 class QueryService:
@@ -69,9 +71,10 @@ class QueryService:
             f"Dimension: {provider.dimension}",
             flush=True,
         )
-
     def _generate_response(self, query: str, model_id: str):
         """Return generated text and provider-reported token counts."""
+        print("DEBUG client type:", type(self.client))
+        print("DEBUG client is None:", self.client is None)
         result = self.client.chat.completions.create(
             model=model_id,
             messages=[
@@ -87,10 +90,13 @@ class QueryService:
             ],
             max_completion_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
         )
-
+        print("DEBUG provider response type:", type(result))
+        if not result.choices:
+            raise RuntimeError(
+                "The model provider returned no completion choices."
+            )
         choice = result.choices[0]
         response_text = (choice.message.content or "").strip()
-
         if not response_text:
             raise RuntimeError(
                 "The model returned no visible text. "
@@ -195,6 +201,8 @@ class QueryService:
                 selected_model.model_id,
             )
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             # Record the failure, but never cache it as a successful answer.
             total_latency_ms = round(
                 (time.perf_counter() - start_time) * 1000.0, 2
@@ -234,8 +242,10 @@ class QueryService:
                 },
             )
 
-            raise
-
+            raise HTTPException(
+                status_code=502,
+                detail="The language model provider failed to process your request. Please try again.",
+            ) from exc
         total_latency_ms = round(
             (time.perf_counter() - start_time) * 1000.0, 2
         )

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from ..config import settings
 from ..schemas import HealthResponse, QueryRequest, QueryResponse, RequestRecord, MetricsSummary
 from ..services.query_service import QueryService
+from ..rate_limit import limiter
 
 router = APIRouter()
 
@@ -29,19 +30,18 @@ def health_check(
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
-
 @router.post("/api/query", response_model=QueryResponse, tags=["Query"])
+@limiter.limit("30/minute")
 def process_query(
-    request: QueryRequest,
-    http_request: Request,
+    request: Request,
+    query_request: QueryRequest,
     service: QueryService = Depends(get_query_service),
 ):
-    """Process a query and preserve its HTTP request ID in telemetry."""
+    """Process a query with rate limiting and request ID tracking."""
     return service.process_query(
-        request,
-        request_id=getattr(http_request.state, "request_id", None),
+        query_request,
+        request_id=getattr(request.state, "request_id", None),
     )
-
 
 @router.get("/api/metrics/summary", response_model=MetricsSummary, tags=["Metrics"])
 def get_metrics_summary(

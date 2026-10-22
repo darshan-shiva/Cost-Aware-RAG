@@ -1,7 +1,6 @@
-
 from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field
-
+from pydantic import field_validator
 
 class HealthResponse(BaseModel):
     status: str = "healthy"
@@ -12,7 +11,7 @@ class HealthResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str = Field(
-        ..., min_length=1,
+        ..., min_length=1,max_length=8000,
         description="User prompt or question to process"
     )
     similarity_threshold: Optional[float] = Field(
@@ -27,8 +26,12 @@ class QueryRequest(BaseModel):
         default=None,
         description="Optional client metadata (e.g. user ID, session ID)"
     )
-
-
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata_size(cls, value):
+        if value is not None and len(str(value)) > 4000:
+            raise ValueError("Metadata must not exceed 4000 characters.")
+        return value
 class QueryResponse(BaseModel):
     request_id: str
     query: str

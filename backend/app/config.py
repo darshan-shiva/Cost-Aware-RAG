@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     )
     VERSION: str = "0.1.0"
     ENVIRONMENT: str = "development"
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
 
     # Semantic Cache Settings
     EMBEDDING_PROVIDER: str = "sentence-transformers"

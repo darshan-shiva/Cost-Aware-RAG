@@ -7,6 +7,9 @@ import time
 import uuid
 from fastapi import Request
 from .logging_config import configure_logging
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from .rate_limit import limiter
 
 configure_logging()
 logger = logging.getLogger("cost_aware_rag.request")
@@ -15,14 +18,19 @@ app = FastAPI(
     version=settings.VERSION,
     description="Backend API for Cost-Aware RAG with Semantic Caching and Intelligent Model Routing.",
 )
+app.state.limiter = limiter
+app.add_exception_handler(
+    RateLimitExceeded,
+    _rate_limit_exceeded_handler,
+)
 
 # Enable CORS for local Vite dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
 
 @app.middleware("http")

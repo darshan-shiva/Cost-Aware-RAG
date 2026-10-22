@@ -8,6 +8,7 @@ from app.cache.embeddings import SentenceTransformersEmbeddingProvider
 from app.metrics.storage import SQLiteMetricsStore
 import tempfile
 import os
+from app.rate_limit import limiter
 
 @pytest.fixture
 def client():
@@ -146,3 +147,72 @@ def test_llm_failure_is_recorded_in_metrics(client):
     assert summary["cache_misses"] == 1
     assert summary["error_count"] == 1
     assert summary["error_rate"] == 1.0
+def test_query_rejects_oversized_input():
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/query",
+        json={"query": "a" * 8001},
+    )
+
+    assert response.status_code == 422
+
+def test_empty_provider_response_is_handled_safely(client):
+    from types import SimpleNamespace
+
+    service = app.dependency_overrides[get_query_service]()
+
+    def empty_response(query, model_id):
+        raise RuntimeError("The model provider returned no completion choices.")
+
+    service._generate_response = empty_response
+
+    response = client.post(
+        "/api/query",
+        json={"query": "Test an empty provider response"},
+    )
+
+    assert response.status_code == 502
+    assert "provider failed" in response.json()["detail"].lower()
+
+    summary_response = client.get("/api/metrics/summary")
+    assert summary_response.status_code == 200
+    assert summary_response.json()["error_count"] == 1
+
+
+def test_provider_failure_returns_safe_502(client):
+    service = app.dependency_overrides[get_query_service]()
+
+    def simulate_timeout(query, model_id):
+        raise TimeoutError("Internal provider timeout details")
+
+    service._generate_response = simulate_timeout
+
+    response = client.post(
+        "/api/query",
+        json={"query": "Test provider timeout handling"},
+    )
+
+    assert response.status_code == 502
+    assert "Internal provider timeout details" not in response.text
+    assert "provider failed" in response.json()["detail"].lower()
+
+    summary = client.get("/api/metrics/summary").json()
+    assert summary["error_count"] == 1
+
+
+def test_query_rejects_oversized_metadata():
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/query",
+        json={
+            "query": "Test metadata validation",
+            "metadata": {"payload": "a" * 5000},
+        },
+    )
+
+    assert response.status_code == 422
