@@ -6,14 +6,24 @@ from typing import Dict, List, Optional
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.routes import build_rag_service, get_query_service, get_rag_service
+from app.api.routes import (
+    SharedComponents,
+    build_rag_service,
+    build_workspace_services,
+    get_query_service,
+    get_rag_service,
+    get_session_manager,
+    get_shared,
+)
 from app.cache.embeddings import SimulatedEmbeddingProvider
 from app.cache.semantic import SemanticCache
 from app.llm import LLMGateway
 from app.main import app
 from app.metrics.storage import SQLiteMetricsStore
 from app.rate_limit import limiter
+from app.routing import CostAwareRouter
 from app.services.query_service import QueryService
+from app.sessions import SessionManager
 
 
 def pytest_configure(config):
@@ -124,6 +134,9 @@ def api(services):
     qs, rag = services
     app.dependency_overrides[get_query_service] = lambda: qs
     app.dependency_overrides[get_rag_service] = lambda: rag
+    app.dependency_overrides[get_shared] = lambda: SharedComponents(
+        qs.cache.embedding_provider, qs.router, qs.gateway
+    )
     limiter.reset()
     with TestClient(app, raise_server_exceptions=False) as client:
         client.qs = qs
@@ -133,9 +146,59 @@ def api(services):
     limiter.reset()
 
 
-def upload(client, filename: str, data: bytes, collection: str = "default"):
+class SessionHarness:
+    """The real session manager wired to simulated embeddings and a FakeLLM
+    per workspace, so tests exercise the production isolation path."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.shared = SharedComponents(
+            embedding_provider=SimulatedEmbeddingProvider(dimension=256),
+            router=CostAwareRouter(),
+            gateway=LLMGateway(client=None, max_completion_tokens=512),
+        )
+        self.fakes: List[FakeLLM] = []
+        self.manager = SessionManager(
+            factory=self._factory,
+            idle_ttl_seconds=1800,
+            max_age_seconds=6 * 3600,
+            max_active=50,
+            clock=lambda: self.now,
+        )
+
+    def _factory(self, db):
+        qs, rag = build_workspace_services(self.shared, db)
+        fake = FakeLLM()
+        rag._generate = fake
+        rag.fake_llm = fake
+        self.fakes.append(fake)
+        return qs, rag
+
+
+@pytest.fixture
+def sessions():
+    harness = SessionHarness()
+    app.dependency_overrides[get_session_manager] = lambda: harness.manager
+    app.dependency_overrides[get_shared] = lambda: harness.shared
+    limiter.reset()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        harness.client = client
+        yield harness
+    harness.manager.close_all()
+    app.dependency_overrides.clear()
+    limiter.reset()
+
+
+def new_session(client) -> Dict[str, str]:
+    res = client.post("/api/session")
+    assert res.status_code == 201, res.text
+    return {"X-Session-Token": res.json()["session_token"]}
+
+
+def upload(client, filename: str, data: bytes, collection: str = "default", headers=None):
     return client.post(
         "/api/documents",
         files={"file": (filename, data, "application/octet-stream")},
         data={"collection": collection},
+        headers=headers,
     )

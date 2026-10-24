@@ -130,7 +130,7 @@ export const DocumentManager: React.FC<DocumentManagerProps> = ({
             <p className="mt-0.5 text-xs text-slate-400">
               PDF or TXT, up to {maxMb} MB. Text is extracted page by page, split into
               {config ? ` ${config.chunk_size_chars}-character` : ''} overlapping chunks and embedded
-              {config ? ` with ${config.embedding_provider}` : ''}. Files are processed on the API server only.
+              {config ? ` with ${config.embedding_provider}` : ''}. Files are processed on the API server and kept only in this browser session's private, in-memory workspace: they are deleted when you start a fresh session, reload the page, stay idle for {config?.session_idle_ttl_minutes ?? 30} minutes, or the server restarts.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">

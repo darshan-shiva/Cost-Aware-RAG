@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
+import { __clearSessionForTests } from '../api/client';
 
 // Recharts' ResponsiveContainer needs ResizeObserver, which jsdom lacks.
 class ResizeObserverStub {
@@ -13,5 +14,6 @@ class ResizeObserverStub {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  __clearSessionForTests();
   window.location.hash = '';
 });

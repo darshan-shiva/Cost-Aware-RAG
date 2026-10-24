@@ -1,0 +1,95 @@
+From 52bed3cc33471f8f6808a6b93900797880d475c3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 24 Oct 2026 15:09:21 +0000
+Subject: [PATCH] Commit missing frontend/src/lib/format.ts and fix lite test
+ run
+
+The Python "lib/" rule in .gitignore also matched frontend/src/lib/, so
+format.ts was never committed and the Vercel build failed with TS2307
+"Cannot find module '../lib/format'". Re-include that directory and add
+the file.
+
+test_mock_model_loading_failure patches sentence_transformers, which
+requirements-lite.txt does not install; skip it when the package is absent.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Vb8dbtav7t3Wtt3rgFnrVF
+---
+ .gitignore                       |  2 ++
+ backend/tests/test_embeddings.py |  2 ++
+ frontend/src/lib/format.ts       | 37 ++++++++++++++++++++++++++++++++
+ 3 files changed, 41 insertions(+)
+ create mode 100644 frontend/src/lib/format.ts
+
+diff --git a/.gitignore b/.gitignore
+index 0939a30..931769d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -14,6 +14,8 @@ downloads/
+ eggs/
+ .eggs/
+ lib/
++# The Python "lib/" pattern above must not hide frontend source modules.
++!frontend/src/lib/
+ lib64/
+ parts/
+ sdist/
+diff --git a/backend/tests/test_embeddings.py b/backend/tests/test_embeddings.py
+index f88a504..7c37f9e 100644
+--- a/backend/tests/test_embeddings.py
++++ b/backend/tests/test_embeddings.py
+@@ -123,6 +123,8 @@ def test_embedding_factory():
+ 
+ def test_mock_model_loading_failure():
+     """[MOCK TEST] Verify that an unresolvable or corrupted model name raises RuntimeError."""
++    # patch() imports the package, which requirements-lite.txt does not install.
++    pytest.importorskip("sentence_transformers")
+     with patch("sentence_transformers.SentenceTransformer", side_effect=Exception("Model weights missing")):
+         with pytest.raises(RuntimeError, match="Could not initialize local embedding model"):
+             # Use unique model name to avoid hitting existing _model_cache
+diff --git a/frontend/src/lib/format.ts b/frontend/src/lib/format.ts
+new file mode 100644
+index 0000000..d3f701b
+--- /dev/null
++++ b/frontend/src/lib/format.ts
+@@ -0,0 +1,37 @@
++/** Display helpers. Missing measurements render as "n/a", never as zero. */
++
++export function fmtMs(value: number | null | undefined): string {
++  if (value === null || value === undefined) return 'n/a';
++  if (value >= 1000) return `${(value / 1000).toFixed(2)} s`;
++  return `${value.toFixed(value < 10 ? 2 : 1)} ms`;
++}
++
++export function fmtUsd(value: number | null | undefined, digits = 6): string {
++  if (value === null || value === undefined) return 'n/a';
++  return `$${value.toFixed(digits)}`;
++}
++
++export function fmtBytes(bytes: number): string {
++  if (bytes < 1024) return `${bytes} B`;
++  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
++  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
++}
++
++export function fmtPct(value: number | null | undefined): string {
++  if (value === null || value === undefined) return 'n/a';
++  return `${(value * 100).toFixed(1)}%`;
++}
++
++export function fmtTime(iso: string): string {
++  const d = new Date(iso);
++  if (Number.isNaN(d.getTime())) return iso;
++  return d.toLocaleString([], { hour12: false, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
++}
++
++export const OUTCOME_LABELS: Record<string, string> = {
++  answered: 'Grounded answer',
++  insufficient_evidence: 'Insufficient evidence',
++  uncited: 'Unverified (no citations)',
++  no_documents: 'No documents',
++  error: 'Error',
++};
+-- 
+2.43.0
+

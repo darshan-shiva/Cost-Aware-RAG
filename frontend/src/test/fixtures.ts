@@ -76,7 +76,16 @@ export function makeAnswer(overrides: Partial<RAGQueryResponse> = {}): RAGQueryR
 type Handler = (url: string, init?: RequestInit) => unknown;
 
 /** Install a fetch mock that routes by "METHOD path" prefix. */
-export function mockApi(routes: Record<string, Handler | unknown>) {
+export const TEST_SESSION_TOKEN = 'T'.repeat(43);
+
+export function mockApi(customRoutes: Record<string, Handler | unknown>) {
+  const routes: Record<string, Handler | unknown> = {
+    'POST /api/session': {
+      session_token: TEST_SESSION_TOKEN, expires_in_seconds: 1800, idle_ttl_seconds: 1800,
+      max_documents: 10, max_upload_mb: 25,
+    },
+    ...customRoutes,
+  };
   const calls: { method: string; url: string; init?: RequestInit }[] = [];
   const fetchMock = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);

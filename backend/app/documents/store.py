@@ -5,9 +5,11 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, Generator, Iterable, List, Optional, Sequence
+from typing import Dict, Generator, Iterable, List, Optional, Sequence, Union
 
 import numpy as np
+
+from ..memdb import InMemoryDatabase
 
 
 DOCUMENT_STATUSES = ("pending", "processing", "ready", "failed")
@@ -61,13 +63,17 @@ class DocumentStore:
     document and everything derived from it are deleted in one transaction.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: Union[str, InMemoryDatabase]):
         self.db_path = db_path
         self._write_lock = threading.Lock()
         self._init_db()
 
     @contextmanager
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
+        if isinstance(self.db_path, InMemoryDatabase):
+            with self.db_path.connection() as conn:
+                yield conn
+            return
         conn = _connect(self.db_path)
         try:
             yield conn

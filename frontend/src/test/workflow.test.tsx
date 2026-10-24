@@ -86,7 +86,7 @@ describe('upload-to-query workflow', () => {
     const file = new File(['x'], 'notes.docx');
     fireEvent.change(await screen.findByTestId('file-input'), { target: { files: [file] } });
     expect(await screen.findByRole('alert')).toHaveTextContent('only .pdf and .txt files are supported');
-    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+    expect(calls.some((c) => c.method === 'POST' && c.url.includes('/api/documents'))).toBe(false);
   });
 
   it('shows the API error message when a question fails', async () => {

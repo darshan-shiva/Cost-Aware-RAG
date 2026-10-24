@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
-from app.api.routes import get_query_service
+from app.api.routes import SharedComponents, get_query_service, get_shared
 from app.services.query_service import QueryService
 from app.cache.semantic import SemanticCache
 from app.cache.embeddings import (
@@ -39,6 +39,9 @@ def _make_client(provider):
     )
 
     app.dependency_overrides[get_query_service] = lambda: test_service
+    app.dependency_overrides[get_shared] = lambda: SharedComponents(
+        provider, test_service.router, test_service.gateway
+    )
     limiter.reset()
     return path
 

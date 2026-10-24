@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = (
         "Cost-Aware RAG: Semantic Caching & Intelligent Model Routing"
     )
-    VERSION: str = "0.2.0"
+    VERSION: str = "0.3.0"
     ENVIRONMENT: str = "development"
     CORS_ORIGINS: list[str] = [
         "http://localhost:5173",
@@ -67,8 +67,9 @@ class Settings(BaseSettings):
     LIGHTWEIGHT_MAX_CONTEXT_TOKENS: int = 8000
     COMPLEX_MAX_CONTEXT_TOKENS: int = 8000
 
-    # Persistence. Documents, chunks, embeddings, cache entries and telemetry
-    # share one SQLite file. Point this at a persistent volume in production.
+    # Only used by offline tools (eval/run_eval.py) and file-backed tests.
+    # The web app keeps every visitor's documents, cache and telemetry in a
+    # private in-memory workspace and never writes them to this file.
     DATABASE_PATH: str = str(
         Path(__file__).resolve().parent.parent / "metrics.db"
     )
@@ -103,6 +104,17 @@ class Settings(BaseSettings):
     # Rate limits (SlowAPI syntax)
     QUERY_RATE_LIMIT: str = "30/minute"
     UPLOAD_RATE_LIMIT: str = "10/minute"
+    SESSION_RATE_LIMIT: str = "20/minute"
+
+    # Visitor sessions. Each browser session gets a private in-memory
+    # workspace that is deleted when the visitor resets it, when it has been
+    # idle or alive too long, or when the server restarts. The limits keep
+    # memory bounded on a small (512 MB) instance.
+    SESSION_IDLE_TTL_MINUTES: float = 30.0
+    SESSION_MAX_AGE_HOURS: float = 6.0
+    SESSION_MAX_ACTIVE: int = 50
+    SESSION_MAX_DOCUMENTS: int = 10
+    SESSION_MAX_UPLOAD_MB: float = 25.0
 
     @property
     def is_production(self) -> bool:

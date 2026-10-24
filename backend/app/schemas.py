@@ -11,7 +11,17 @@ class HealthResponse(BaseModel):
     llm_configured: Optional[bool] = None
     database_ok: Optional[bool] = None
     document_count: Optional[int] = None
+    active_sessions: Optional[int] = None
     environment: Optional[str] = None
+
+
+class SessionOut(BaseModel):
+    # Returned only when the session is created; never echoed afterwards.
+    session_token: Optional[str] = None
+    expires_in_seconds: int
+    idle_ttl_seconds: int
+    max_documents: int
+    max_upload_mb: float
 
 
 class QueryRequest(BaseModel):

@@ -1,0 +1,2041 @@
+diff --git a/README.md b/README.md
+index c4478c3..84f8c09 100644
+--- a/README.md
++++ b/README.md
+@@ -7,11 +7,10 @@ same, and a router that sends simple questions to a cheaper Groq model. Every
+ request is recorded with its retrieval, cache, routing, token, cost and
+ latency details, and the dashboard shows those records.
+ 
+-> **Status.** The document-grounded RAG pipeline described here lives on the
+-> `feature/document-grounded-rag` branch and has **not been deployed** yet.
+-> The live demo at https://cost-aware-rag.vercel.app still runs the earlier
+-> cache-and-routing version (see [History](#history)). All numbers below come
+-> from local runs; nothing here was measured on the hosted service.
++> **Status.** All numbers below come from local runs; nothing here was
++> measured on the hosted service. Every visitor gets a private, temporary
++> workspace (see [Sessions and privacy](#sessions-and-privacy)); nothing a
++> visitor uploads is stored permanently.
+ 
+ ## What problem this solves
+ 
+@@ -75,10 +74,49 @@ and costs the same for a trivial question as for a hard one. This project:
+                                                    cache/fresh badge, pipeline timings
+ ```
+ 
+-One SQLite file (WAL mode) holds documents, page text, chunk vectors, the
+-semantic cache and telemetry. Raw uploads are not kept; re-indexing rebuilds
++Each visitor session has its own in-memory SQLite database holding that
++session's documents, page text, chunk vectors, semantic cache and telemetry.
++Nothing is written to disk. Raw uploads are not kept; re-indexing rebuilds
+ chunks from the stored page text.
+ 
++## Sessions and privacy
++
++Every page load starts a fresh, empty workspace, and no visitor can see
++another visitor's documents, answers or request history.
++
++- **Server-issued tokens.** The frontend calls `POST /api/session` and gets a
++  random 256-bit token. Every document, query, cache and metrics request sends
++  it in the `X-Session-Token` header. The server keeps only a SHA-256 hash of
++  each token and rejects missing, unknown, malformed or expired tokens with
++  401. Clients cannot choose a token, so passing a different ID only works
++  with a stolen token.
++- **Private workspace per session.** Each session owns an in-memory SQLite
++  database and its own document store, vector index, semantic cache and
++  telemetry store. Only stateless parts are shared: the embedding model, the
++  router and the LLM client. Visitor A's document IDs return 404 for visitor
++  B, and a cache hit can only come from the same session's cache.
++- **Memory only in the browser.** The token lives in a JavaScript variable. It
++  is never written to localStorage, sessionStorage or cookies, and no document
++  content is stored in the browser. Reloading or opening a new tab starts a
++  new session.
++- **Cleanup.** A workspace is deleted when the visitor presses *Start a fresh
++  session* (`DELETE /api/session`), when the tab closes or reloads (a
++  best-effort `navigator.sendBeacon` to `/api/session/close`), after
++  `RAG_SESSION_IDLE_TTL_MINUTES` (30) idle, after `RAG_SESSION_MAX_AGE_HOURS`
++  (6) in total, or when the server restarts or redeploys.
++- **Bounded memory.** At most `RAG_SESSION_MAX_ACTIVE` (50) sessions are kept;
++  creating one more evicts the least recently used. Each session may hold
++  `RAG_SESSION_MAX_DOCUMENTS` (10) documents and `RAG_SESSION_MAX_UPLOAD_MB`
++  (25) MB of uploads, and new sessions are rate-limited
++  (`RAG_SESSION_RATE_LIMIT`, 20/minute per client).
++- **Observability is per session.** The dashboard's metrics, costs and
++  request history cover only your own session. `/health` reports only the
++  number of active sessions.
++
++Because sessions live in one process's memory, the backend must run as a
++**single worker**. With several workers, a request could reach a worker that
++does not know the session.
++
+ ## How it works
+ 
+ ### Ingestion
+@@ -202,16 +240,22 @@ of the question.
+   as paths.
+ - Rate limits: `RAG_QUERY_RATE_LIMIT` (30/minute) on both query endpoints and
+   `RAG_UPLOAD_RATE_LIMIT` (10/minute) on upload and re-index.
+-- In production, `POST /api/metrics/reset` requires the `X-Admin-Token`
+-  header to match `RAG_ADMIN_TOKEN`, and it is disabled when no token is set.
++- Every document, query and metrics endpoint is scoped to the caller's
++  session; see [Sessions and privacy](#sessions-and-privacy).
++- In production, `POST /api/metrics/reset` (which clears only the caller's
++  session telemetry and cache) also requires the `X-Admin-Token` header to
++  match `RAG_ADMIN_TOKEN`, and it is disabled when no token is set. Visitors
++  clear their own workspace with `DELETE /api/session`.
+ - CORS allows only `RAG_CORS_ORIGINS`, without credentials. Responses send
+   `X-Content-Type-Options: nosniff` and a strict `Referrer-Policy`. Request
+   IDs from clients are sanitized.
+ - Prompt injection: see [Retrieval and grounding](#retrieval-and-grounding).
+   The defences reduce the risk but cannot rule it out with any LLM.
+-- **There is no user authentication.** Collections separate documents, but
+-  anyone who can reach the API can read or delete any collection. Do not
+-  upload confidential documents to a public deployment.
++- **There are no user accounts.** Isolation is per browser session, not per
++  person, and the session token is a bearer secret: anyone who obtains it can
++  use that session until it ends. Uploaded text is processed in the server's
++  memory and sent to Groq when you ask a question, so avoid confidential
++  documents on a public deployment.
+ 
+ ## Evaluation
+ 
+@@ -311,7 +355,9 @@ Testing Library.
+ 
+ | Endpoint | Method | Purpose |
+ |---|---|---|
+-| `/health` | GET | Status, embedding provider, LLM key configured (yes/no), document counts |
++| `/health` | GET | Status, embedding provider, LLM key configured (yes/no), active session count |
++| `/api/session` | POST / GET / DELETE | Start a private workspace (returns the token) / its expiry / delete it and all its data |
++| `/api/session/close` | POST | Same as DELETE, for `navigator.sendBeacon` (token as plain-text body) |
+ | `/api/config` | GET | Non-secret settings the UI needs |
+ | `/api/rag/query` | POST | Grounded answer over a collection (optional `document_ids`, `top_k`, `min_relevance`, `force_refresh`) |
+ | `/api/query` | POST | General-knowledge mode, **not grounded** (the original endpoint) |
+@@ -321,9 +367,10 @@ Testing Library.
+ | `/api/documents/{id}/reindex` | POST | Rebuild chunks and embeddings |
+ | `/api/metrics/summary` | GET | Aggregates (`?mode=rag|general`) |
+ | `/api/metrics/requests` | GET | Recent request records |
+-| `/api/metrics/reset` | POST | Clear telemetry and cache (admin token in production) |
++| `/api/metrics/reset` | POST | Clear this session's telemetry and cache (admin token in production) |
+ 
+-Interactive docs at `/docs` when the backend is running.
++Every endpoint except `/health`, `/api/config` and `POST /api/session` needs
++the `X-Session-Token` header. Interactive docs at `/docs` when the backend is running.
+ 
+ ## Local setup
+ 
+@@ -360,7 +407,10 @@ lists every one with its default. The ones you will most likely change:
+ | `RAG_RETRIEVAL_MIN_RELEVANCE` | `0.30` | About `0.15` with `simulated` |
+ | `RAG_SIMILARITY_THRESHOLD` | `0.82` | Cache reuse threshold |
+ | `RAG_ROUTING_POLICY` | `complexity` | or `fixed-lightweight`, `fixed-complex` |
+-| `RAG_DATABASE_PATH` | `backend/metrics.db` | Point at a persistent disk in production |
++| `RAG_SESSION_IDLE_TTL_MINUTES` / `RAG_SESSION_MAX_AGE_HOURS` | `30` / `6` | When a workspace is deleted |
++| `RAG_SESSION_MAX_ACTIVE` | `50` | Sessions kept in memory; the least recently used is evicted beyond this |
++| `RAG_SESSION_MAX_DOCUMENTS` / `RAG_SESSION_MAX_UPLOAD_MB` | `10` / `25` | Per-session upload limits |
++| `RAG_DATABASE_PATH` | `backend/metrics.db` | Only used by the offline evaluation; the web app writes nothing to disk |
+ | `RAG_CORS_ORIGINS` | localhost:5173 | JSON list |
+ | `RAG_ENVIRONMENT` / `RAG_ADMIN_TOKEN` | `development` / empty | Production locks the reset endpoint |
+ | `VITE_API_BASE_URL` (frontend) | empty | Public backend URL; build-time; never a secret |
+@@ -368,8 +418,8 @@ lists every one with its default. The ones you will most likely change:
+ ## Tests
+ 
+ ```bash
+-cd backend && python -m pytest -q      # 134 passed, 18 skipped (last local run)
+-cd frontend && npm test && npm run build   # 11 passed; build succeeds
++cd backend && python -m pytest -q      # 153 passed, 18 skipped (last local run)
++cd frontend && npm test && npm run build   # 17 passed; build succeeds
+ ```
+ 
+ All LLM calls are mocked, so the tests need no key, network or money. The
+@@ -382,16 +432,18 @@ fallback, telemetry, rate limits, prompt injection, and secret handling. The
+ frontend tests cover the documents page, the chat with citations, the
+ cache badge, and loading, empty and error states.
+ 
++`tests/test_sessions.py` and `src/test/session.test.tsx` cover session
++isolation: visitor B sees an empty workspace and gets 404 for visitor A's
++documents; forged or missing tokens get 401; reset, tab-close beacons, expiry
++and restarts delete data; nothing is written to disk; cache hits never cross
++sessions; and the token never reaches browser storage.
++
+ ## Deployment
+ 
+ **Backend (Render).** `render.yaml` is a reference Blueprint; it is not
+-applied to the existing service automatically. Decide on storage first:
+-
+-- **Persistent:** a paid instance with a disk mounted at `/var/data` and
+-  `RAG_DATABASE_PATH=/var/data/rag.db`. Documents, cache and telemetry
+-  survive restarts.
+-- **Ephemeral (free tier):** works, but every deploy or restart deletes all
+-  uploaded documents and telemetry. Fine for a demo; say so in the UI or docs.
++applied to the existing service automatically. No disk or database is
++needed: workspaces live in memory, and a restart, redeploy or free-tier
++spin-down simply ends every session, which is the intended behaviour.
+ 
+ On about 512 MB of RAM use `requirements-lite.txt` with
+ `RAG_EMBEDDING_PROVIDER=simulated` and `RAG_RETRIEVAL_MIN_RELEVANCE=0.15`;
+@@ -412,13 +464,15 @@ Production and redeploy, because Vite embeds it at build time.
+ | Every question gets "insufficient evidence" | `RAG_RETRIEVAL_MIN_RELEVANCE` too high for the embedder (use ~0.15 with `simulated`) or document still processing |
+ | Document stuck in `failed` after a restart | Ingestion was interrupted; press Re-index |
+ | PDF fails with "No extractable text was found" | Scanned PDF with no text layer (no OCR) |
+-| Documents vanish after deploy | Ephemeral filesystem; add a disk |
++| Documents vanish, or "Your session expired" appears | Expected: the session was reset, idle for 30 minutes, evicted, or the server restarted |
++| Every request returns 401 | The backend runs more than one worker, or the frontend is pointed at a different backend than the one that issued the session |
+ | Browser shows CORS errors | Frontend origin missing from `RAG_CORS_ORIGINS` |
+ | Process killed on startup | MiniLM + PyTorch exceeded memory; use the lite setup |
+ 
+ ## Known limitations
+ 
+-- No authentication or per-user isolation.
++- No user accounts: isolation is per browser session, and sessions are lost
++  on every restart by design.
+ - Exact vector search loads a collection's vectors into memory; fine for
+   thousands of chunks, not millions.
+ - Single process: background ingestion is not a durable job queue.
+diff --git a/backend/.env.example b/backend/.env.example
+index cc913bb..86c3fac 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -52,8 +52,16 @@ RAG_RETRIEVAL_TOP_K=5
+ RAG_RETRIEVAL_MAX_TOP_K=12
+ RAG_RETRIEVAL_MIN_RELEVANCE=0.30
+ 
+-# --- Storage: one SQLite file for documents, vectors, cache and telemetry.
+-# In production point this at a persistent disk, e.g. /var/data/rag.db.
++# --- Visitor sessions: every browser session gets a private in-memory
++# workspace; nothing is written to disk. Run a single worker.
++RAG_SESSION_IDLE_TTL_MINUTES=30
++RAG_SESSION_MAX_AGE_HOURS=6
++RAG_SESSION_MAX_ACTIVE=50
++RAG_SESSION_MAX_DOCUMENTS=10
++RAG_SESSION_MAX_UPLOAD_MB=25
++RAG_SESSION_RATE_LIMIT=20/minute
++
++# Only used by the offline evaluation (eval/run_eval.py).
+ # RAG_DATABASE_PATH=/absolute/path/to/rag.db
+ 
+ # --- Security
+diff --git a/backend/app/api/routes.py b/backend/app/api/routes.py
+index 5d9c1d8..d10f3b9 100644
+--- a/backend/app/api/routes.py
++++ b/backend/app/api/routes.py
+@@ -1,7 +1,8 @@
+ import hmac
+-import sqlite3
++import logging
++from dataclasses import dataclass
+ from datetime import datetime, timezone
+-from typing import List, Optional
++from typing import List, Optional, Union
+ from fastapi import (
+     APIRouter,
+     BackgroundTasks,
+@@ -12,6 +13,7 @@ from fastapi import (
+     HTTPException,
+     Query,
+     Request,
++    Response,
+     UploadFile,
+ )
+ from ..config import settings
+@@ -25,34 +27,119 @@ from ..schemas import (
+     RAGQueryRequest,
+     RAGQueryResponse,
+     RequestRecord,
++    SessionOut,
+     UploadResponse,
+ )
+-from ..services.query_service import QueryService
++from ..cache import SemanticCache
++from ..cache.embeddings import BaseEmbeddingProvider
++from ..llm import LLMGateway
++from ..memdb import InMemoryDatabase, WorkspaceClosed
++from ..metrics import SQLiteMetricsStore
++from ..routing import CostAwareRouter
++from ..services.query_service import (
++    QueryService,
++    build_embedding_provider,
++    build_llm_gateway,
++)
++from ..sessions import SessionManager, Workspace
+ from ..documents import (
+     DocumentRecord,
+     DocumentStore,
+     DocumentValidationError,
+     IngestionService,
+     VectorIndex,
++    sanitize_filename,
+ )
+ from ..rag import RAGService
+ from ..rate_limit import limiter
+ 
++logger = logging.getLogger("cost_aware_rag.api")
+ router = APIRouter()
+ 
+-# Singleton or dependency-injected query service
+-_service_instance: QueryService | None = None
+-_rag_instance: RAGService | None = None
++SESSION_HEADER = "X-Session-Token"
++
++
++@dataclass
++class SharedComponents:
++    """Stateless pieces every session uses: they hold no visitor data."""
++
++    embedding_provider: BaseEmbeddingProvider
++    router: CostAwareRouter
++    gateway: LLMGateway
++
++
++_shared: Optional[SharedComponents] = None
++_session_manager: Optional[SessionManager] = None
+ 
+ 
+-def get_query_service() -> QueryService:
+-    global _service_instance
+-    if _service_instance is None:
+-        _service_instance = QueryService()
+-    return _service_instance
++def get_shared() -> SharedComponents:
++    global _shared
++    if _shared is None:
++        gateway = build_llm_gateway()
++        if not gateway.is_configured:
++            logger.warning("llm_not_configured")
++        _shared = SharedComponents(
++            embedding_provider=build_embedding_provider(),
++            router=CostAwareRouter(),
++            gateway=gateway,
++        )
++    return _shared
++
++
++def build_workspace_services(shared: SharedComponents, db: InMemoryDatabase):
++    """A session's private cache, telemetry, document store and RAG service."""
++    cache = SemanticCache(
++        embedding_provider=shared.embedding_provider,
++        default_threshold=settings.SIMILARITY_THRESHOLD,
++        max_entries=settings.CACHE_MAX_ENTRIES,
++        db_path=db,
++    )
++    query_service = QueryService(
++        cache=cache,
++        router=shared.router,
++        metrics_store=SQLiteMetricsStore(db),
++        gateway=shared.gateway,
++    )
++    return query_service, build_rag_service(query_service, db)
+ 
+ 
+-def build_rag_service(query_service: QueryService, db_path: str) -> RAGService:
++def get_session_manager() -> SessionManager:
++    global _session_manager
++    if _session_manager is None:
++        _session_manager = SessionManager(
++            factory=lambda db: build_workspace_services(get_shared(), db),
++            idle_ttl_seconds=settings.SESSION_IDLE_TTL_MINUTES * 60,
++            max_age_seconds=settings.SESSION_MAX_AGE_HOURS * 3600,
++            max_active=settings.SESSION_MAX_ACTIVE,
++        )
++    return _session_manager
++
++
++def get_workspace(
++    x_session_token: Optional[str] = Header(default=None, alias=SESSION_HEADER),
++    manager: SessionManager = Depends(get_session_manager),
++) -> Workspace:
++    """Resolve the caller's private workspace from its session token."""
++    workspace = manager.get(x_session_token)
++    if workspace is None:
++        raise HTTPException(
++            status_code=401,
++            detail="Your session is missing or has expired. Reload the page to start a new one.",
++        )
++    return workspace
++
++
++def get_query_service(workspace: Workspace = Depends(get_workspace)) -> QueryService:
++    return workspace.query_service
++
++
++def get_rag_service(workspace: Workspace = Depends(get_workspace)) -> RAGService:
++    return workspace.rag
++
++
++def build_rag_service(
++    query_service: QueryService, db_path: Union[str, InMemoryDatabase]
++) -> RAGService:
+     """Wire the document store, vector index and ingestion around the shared
+     embedding provider, cache, router, gateway and telemetry store."""
+     store = DocumentStore(db_path)
+@@ -73,11 +160,12 @@ def build_rag_service(query_service: QueryService, db_path: str) -> RAGService:
+     return RAGService(query_service, store, index, ingestion)
+ 
+ 
+-def get_rag_service() -> RAGService:
+-    global _rag_instance
+-    if _rag_instance is None:
+-        _rag_instance = build_rag_service(get_query_service(), settings.DATABASE_PATH)
+-    return _rag_instance
++def _process_upload(ingestion: IngestionService, document_id: str, version: int, data) -> None:
++    try:
++        ingestion.process(document_id, version, data)
++    except WorkspaceClosed:
++        # The visitor reset or abandoned the session mid-processing.
++        logger.info("ingestion_skipped_session_closed")
+ 
+ 
+ def _iso(ts: float) -> str:
+@@ -118,38 +206,33 @@ def require_admin(x_admin_token: Optional[str] = Header(default=None)) -> None:
+ 
+ @router.get("/health", response_model=HealthResponse, tags=["System"])
+ def health_check(
+-    service: QueryService = Depends(get_query_service),
+-    rag: RAGService = Depends(get_rag_service),
++    shared: SharedComponents = Depends(get_shared),
++    manager: SessionManager = Depends(get_session_manager),
+ ):
+-    """Application health and status check."""
+-    database_ok = True
+-    document_count: Optional[int] = None
+-    try:
+-        document_count = sum(c["document_count"] for c in rag.store.list_collections())
+-    except sqlite3.Error:
+-        database_ok = False
+-    provider = service.cache.embedding_provider
++    """Application health and status check. Reports no visitor data."""
++    provider = shared.embedding_provider
+     return HealthResponse(
+-        status="healthy" if database_ok else "degraded",
++        status="healthy",
+         version=settings.VERSION,
+         simulated_mode=provider.is_simulated,
+         timestamp=datetime.now(timezone.utc).isoformat(),
+         embedding_provider=provider.provider_name,
+-        llm_configured=service.gateway.is_configured,
+-        database_ok=database_ok,
+-        document_count=document_count,
++        llm_configured=shared.gateway.is_configured,
++        database_ok=True,
++        document_count=None,
++        active_sessions=manager.active_count,
+         environment=settings.ENVIRONMENT,
+     )
+ 
+ 
+ @router.get("/api/config", tags=["System"])
+-def public_config(service: QueryService = Depends(get_query_service)):
++def public_config(shared: SharedComponents = Depends(get_shared)):
+     """Non-secret runtime configuration the dashboard uses for labels and defaults."""
+-    r = service.router
++    r = shared.router
+     return {
+-        "embedding_provider": service.cache.embedding_provider.provider_name,
+-        "embedding_simulated": service.cache.embedding_provider.is_simulated,
+-        "llm_configured": service.gateway.is_configured,
++        "embedding_provider": shared.embedding_provider.provider_name,
++        "embedding_simulated": shared.embedding_provider.is_simulated,
++        "llm_configured": shared.gateway.is_configured,
+         "routing_policy": r.policy,
+         "models": [
+             {
+@@ -162,7 +245,7 @@ def public_config(service: QueryService = Depends(get_query_service)):
+             for m in r.profiles
+         ],
+         "pricing_is_estimate": True,
+-        "cache_similarity_threshold": service.cache.default_threshold,
++        "cache_similarity_threshold": settings.SIMILARITY_THRESHOLD,
+         "retrieval_top_k": settings.RETRIEVAL_TOP_K,
+         "retrieval_max_top_k": settings.RETRIEVAL_MAX_TOP_K,
+         "retrieval_min_relevance": settings.RETRIEVAL_MIN_RELEVANCE,
+@@ -172,9 +255,65 @@ def public_config(service: QueryService = Depends(get_query_service)):
+         "chunk_size_chars": settings.CHUNK_SIZE_CHARS,
+         "chunk_overlap_chars": settings.CHUNK_OVERLAP_CHARS,
+         "telemetry_stores_query_text": settings.TELEMETRY_STORE_QUERY_TEXT,
++        "session_idle_ttl_minutes": settings.SESSION_IDLE_TTL_MINUTES,
++        "session_max_documents": settings.SESSION_MAX_DOCUMENTS,
++        "session_max_upload_mb": settings.SESSION_MAX_UPLOAD_MB,
+     }
+ 
+ 
++# ------------------------------------------------------------------ sessions
++
++
++def _session_out(manager: SessionManager, workspace: Workspace, token: Optional[str] = None) -> SessionOut:
++    return SessionOut(
++        session_token=token,
++        expires_in_seconds=round(manager.expires_in(workspace)),
++        idle_ttl_seconds=round(manager.idle_ttl_seconds),
++        max_documents=settings.SESSION_MAX_DOCUMENTS,
++        max_upload_mb=settings.SESSION_MAX_UPLOAD_MB,
++    )
++
++
++@router.post("/api/session", response_model=SessionOut, status_code=201, tags=["Session"])
++@limiter.limit(settings.SESSION_RATE_LIMIT)
++def create_session(request: Request, manager: SessionManager = Depends(get_session_manager)):
++    """Start a private, empty workspace. Send the returned token in the
++    X-Session-Token header; it is the only key to this workspace."""
++    token, workspace = manager.create()
++    return _session_out(manager, workspace, token)
++
++
++@router.get("/api/session", response_model=SessionOut, tags=["Session"])
++def get_session_info(
++    workspace: Workspace = Depends(get_workspace),
++    manager: SessionManager = Depends(get_session_manager),
++):
++    return _session_out(manager, workspace)
++
++
++@router.delete("/api/session", tags=["Session"])
++def end_session(
++    x_session_token: Optional[str] = Header(default=None, alias=SESSION_HEADER),
++    manager: SessionManager = Depends(get_session_manager),
++):
++    """Delete this session's documents, chunks, embeddings, cached answers
++    and telemetry. Only the session's own token can do this."""
++    if not manager.close(x_session_token):
++        raise HTTPException(status_code=401, detail="Session not found or already ended.")
++    return {"message": "Session ended; its documents, answers and telemetry were deleted."}
++
++
++@router.post("/api/session/close", status_code=204, tags=["Session"])
++async def end_session_beacon(request: Request, manager: SessionManager = Depends(get_session_manager)):
++    """Same as DELETE /api/session, for navigator.sendBeacon when the tab
++    closes: the token is the plain-text body, because beacons cannot set
++    headers. Always returns 204 so it reveals nothing about the token."""
++    body = await request.body()
++    if len(body) <= 128:
++        manager.close(body.decode("ascii", errors="ignore").strip())
++    return Response(status_code=204)
++
++
+ @router.post("/api/query", response_model=QueryResponse, tags=["Query"])
+ @limiter.limit(settings.QUERY_RATE_LIMIT)
+ def process_query(
+@@ -244,8 +383,9 @@ async def upload_document(
+     collection: str = Form(default="default"),
+     rag: RAGService = Depends(get_rag_service),
+ ):
+-    """Upload a PDF or TXT file. Processing (extraction, chunking, embedding)
+-    runs in the background; poll GET /api/documents/{id} for its status."""
++    """Upload a PDF or TXT file into this session's workspace. Processing
++    (extraction, chunking, embedding) runs in the background; poll
++    GET /api/documents/{id} for its status."""
+     limit = rag.ingestion.max_upload_bytes
+     declared = request.headers.get("content-length")
+     if declared and declared.isdigit() and int(declared) > limit + 64 * 1024:
+@@ -254,6 +394,7 @@ async def upload_document(
+     await file.close()
+     if len(data) > limit:
+         raise HTTPException(status_code=413, detail=f"The file exceeds the {settings.MAX_UPLOAD_MB:g} MB upload limit.")
++    _check_session_quota(rag, collection, file.filename, len(data))
+     try:
+         outcome = rag.ingestion.register_upload(collection, file.filename, data)
+     except DocumentValidationError as exc:
+@@ -263,7 +404,7 @@ async def upload_document(
+     if outcome.outcome == "duplicate":
+         message = f"Identical content is already indexed as '{doc.filename}'; nothing was re-processed."
+     else:
+-        background.add_task(rag.ingestion.process, doc.document_id, doc.version, data)
++        background.add_task(_process_upload, rag.ingestion, doc.document_id, doc.version, data)
+         message = (
+             f"Replacing '{doc.filename}' with version {doc.version}; cached answers for this collection were invalidated."
+             if outcome.outcome == "replaced"
+@@ -276,6 +417,28 @@ async def upload_document(
+     )
+ 
+ 
++def _check_session_quota(rag: RAGService, collection: str, filename: Optional[str], size: int) -> None:
++    """Bound the memory one session can use. A same-name upload replaces
++    the earlier file, so it does not count twice."""
++    existing = rag.store.list(None)
++    try:
++        name = sanitize_filename(filename)
++    except DocumentValidationError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    kept = [d for d in existing if not (d.collection == collection and d.filename == name)]
++    if len(kept) >= settings.SESSION_MAX_DOCUMENTS:
++        raise HTTPException(
++            status_code=409,
++            detail=f"This session already has {settings.SESSION_MAX_DOCUMENTS} documents. Delete one first.",
++        )
++    total = sum(d.size_bytes for d in kept) + size
++    if total > settings.SESSION_MAX_UPLOAD_MB * 1024 * 1024:
++        raise HTTPException(
++            status_code=413,
++            detail=f"This session's uploads would exceed {settings.SESSION_MAX_UPLOAD_MB:g} MB in total. Delete a document first.",
++        )
++
++
+ @router.post("/api/documents/{document_id}/reindex", response_model=DocumentOut, status_code=202, tags=["Documents"])
+ @limiter.limit(settings.UPLOAD_RATE_LIMIT)
+ def reindex_document(
+@@ -291,7 +454,7 @@ def reindex_document(
+         raise HTTPException(status_code=409, detail=str(exc)) from exc
+     if doc is None:
+         raise HTTPException(status_code=404, detail="Document not found.")
+-    background.add_task(rag.ingestion.process, doc.document_id, doc.version, None)
++    background.add_task(_process_upload, rag.ingestion, doc.document_id, doc.version, None)
+     return _document_out(doc, rag.ingestion.embedding_model)
+ 
+ 
+@@ -333,9 +496,10 @@ def get_recent_requests(
+ def reset_metrics_and_cache(
+     service: QueryService = Depends(get_query_service),
+ ):
+-    """Clear telemetry and the semantic cache (documents are kept).
++    """Clear this session's telemetry and semantic cache (documents are kept).
+ 
+-    Open in development; requires X-Admin-Token in production."""
++    Open in development; requires X-Admin-Token in production. Visitors use
++    DELETE /api/session to clear their own workspace."""
+     service.cache.clear()
+     service.metrics_store.clear()
+     return {"message": "Cache and metrics reset successfully."}
+diff --git a/backend/app/cache/semantic.py b/backend/app/cache/semantic.py
+index 4c5e356..71ee89b 100644
+--- a/backend/app/cache/semantic.py
++++ b/backend/app/cache/semantic.py
+@@ -5,7 +5,8 @@ import json
+ import sqlite3
+ import logging
+ from contextlib import contextmanager
+-from typing import Optional, Dict, Any, List, Generator, Callable
++from typing import Optional, Dict, Any, List, Generator, Callable, Union
++from ..memdb import InMemoryDatabase
+ from .base import BaseCache, CacheEntry, CacheLookupResult
+ from .embeddings import BaseEmbeddingProvider, SimulatedEmbeddingProvider
+ from .guards import normalize_query, salient_terms_conflict
+@@ -57,7 +58,7 @@ class SemanticCache(BaseCache):
+         embedding_provider: Optional[BaseEmbeddingProvider] = None,
+         default_threshold: float = 0.82,
+         max_entries: int = 1000,
+-        db_path: Optional[str] = None,
++        db_path: Optional[Union[str, InMemoryDatabase]] = None,
+     ):
+         self.embedding_provider = embedding_provider or SimulatedEmbeddingProvider()
+         self.default_threshold = default_threshold
+@@ -73,6 +74,10 @@ class SemanticCache(BaseCache):
+     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
+         if not self.db_path:
+             raise RuntimeError("Database path not configured for persistent cache.")
++        if isinstance(self.db_path, InMemoryDatabase):
++            with self.db_path.connection() as conn:
++                yield conn
++            return
+         conn = sqlite3.connect(self.db_path)
+         conn.row_factory = sqlite3.Row
+         try:
+diff --git a/backend/app/config.py b/backend/app/config.py
+index 1657ace..4da5eac 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -14,7 +14,7 @@ class Settings(BaseSettings):
+     PROJECT_NAME: str = (
+         "Cost-Aware RAG: Semantic Caching & Intelligent Model Routing"
+     )
+-    VERSION: str = "0.2.0"
++    VERSION: str = "0.3.0"
+     ENVIRONMENT: str = "development"
+     CORS_ORIGINS: list[str] = [
+         "http://localhost:5173",
+@@ -67,8 +67,9 @@ class Settings(BaseSettings):
+     LIGHTWEIGHT_MAX_CONTEXT_TOKENS: int = 8000
+     COMPLEX_MAX_CONTEXT_TOKENS: int = 8000
+ 
+-    # Persistence. Documents, chunks, embeddings, cache entries and telemetry
+-    # share one SQLite file. Point this at a persistent volume in production.
++    # Only used by offline tools (eval/run_eval.py) and file-backed tests.
++    # The web app keeps every visitor's documents, cache and telemetry in a
++    # private in-memory workspace and never writes them to this file.
+     DATABASE_PATH: str = str(
+         Path(__file__).resolve().parent.parent / "metrics.db"
+     )
+@@ -103,6 +104,17 @@ class Settings(BaseSettings):
+     # Rate limits (SlowAPI syntax)
+     QUERY_RATE_LIMIT: str = "30/minute"
+     UPLOAD_RATE_LIMIT: str = "10/minute"
++    SESSION_RATE_LIMIT: str = "20/minute"
++
++    # Visitor sessions. Each browser session gets a private in-memory
++    # workspace that is deleted when the visitor resets it, when it has been
++    # idle or alive too long, or when the server restarts. The limits keep
++    # memory bounded on a small (512 MB) instance.
++    SESSION_IDLE_TTL_MINUTES: float = 30.0
++    SESSION_MAX_AGE_HOURS: float = 6.0
++    SESSION_MAX_ACTIVE: int = 50
++    SESSION_MAX_DOCUMENTS: int = 10
++    SESSION_MAX_UPLOAD_MB: float = 25.0
+ 
+     @property
+     def is_production(self) -> bool:
+diff --git a/backend/app/documents/store.py b/backend/app/documents/store.py
+index 5ee387f..e31aa48 100644
+--- a/backend/app/documents/store.py
++++ b/backend/app/documents/store.py
+@@ -5,10 +5,12 @@ import threading
+ import time
+ from contextlib import contextmanager
+ from dataclasses import dataclass, field
+-from typing import Dict, Generator, Iterable, List, Optional, Sequence
++from typing import Dict, Generator, Iterable, List, Optional, Sequence, Union
+ 
+ import numpy as np
+ 
++from ..memdb import InMemoryDatabase
++
+ 
+ DOCUMENT_STATUSES = ("pending", "processing", "ready", "failed")
+ 
+@@ -61,13 +63,17 @@ class DocumentStore:
+     document and everything derived from it are deleted in one transaction.
+     """
+ 
+-    def __init__(self, db_path: str):
++    def __init__(self, db_path: Union[str, InMemoryDatabase]):
+         self.db_path = db_path
+         self._write_lock = threading.Lock()
+         self._init_db()
+ 
+     @contextmanager
+     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
++        if isinstance(self.db_path, InMemoryDatabase):
++            with self.db_path.connection() as conn:
++                yield conn
++            return
+         conn = _connect(self.db_path)
+         try:
+             yield conn
+diff --git a/backend/app/main.py b/backend/app/main.py
+index a6211b6..dcdff96 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -34,7 +34,7 @@ app.add_middleware(
+     allow_origins=settings.CORS_ORIGINS,
+     allow_credentials=False,
+     allow_methods=["GET", "POST", "DELETE"],
+-    allow_headers=["Content-Type", "Authorization", "X-Request-ID", "X-Admin-Token"],
++    allow_headers=["Content-Type", "Authorization", "X-Request-ID", "X-Admin-Token", "X-Session-Token"],
+     expose_headers=["X-Request-ID"],
+ )
+ 
+diff --git a/backend/app/memdb.py b/backend/app/memdb.py
+new file mode 100644
+index 0000000..4207dd0
+--- /dev/null
++++ b/backend/app/memdb.py
+@@ -0,0 +1,57 @@
++"""A private, in-memory SQLite database for one visitor session.
++
++The document store, semantic cache and telemetry store normally open a new
++connection to a database file for every operation. An in-memory SQLite
++database exists only inside the connection that created it, so a session
++instead owns one connection and every store borrows it under a lock.
++Nothing is written to disk: closing the session (or stopping the process)
++frees the documents, chunks, embeddings, cached answers and telemetry.
++"""
++
++import sqlite3
++import threading
++from contextlib import contextmanager
++from typing import Generator
++
++
++class WorkspaceClosed(RuntimeError):
++    """Raised when a store is used after its session has been closed."""
++
++
++class InMemoryDatabase:
++    def __init__(self) -> None:
++        self._conn = sqlite3.connect(":memory:", check_same_thread=False)
++        self._conn.row_factory = sqlite3.Row
++        self._conn.execute("PRAGMA foreign_keys = ON;")
++        # Re-entrant: a store method may call another store method that also
++        # borrows the connection on the same thread.
++        self._lock = threading.RLock()
++        self._depth = 0
++        self._closed = False
++
++    @property
++    def closed(self) -> bool:
++        return self._closed
++
++    @contextmanager
++    def connection(self) -> Generator[sqlite3.Connection, None, None]:
++        with self._lock:
++            if self._closed:
++                raise WorkspaceClosed("This session has been closed.")
++            self._depth += 1
++            try:
++                yield self._conn
++            finally:
++                self._depth -= 1
++                # The file-backed stores relied on close() discarding any
++                # uncommitted work; keep that behaviour for the shared
++                # connection once the outermost borrower is done.
++                if self._depth == 0 and not self._closed and self._conn.in_transaction:
++                    self._conn.rollback()
++
++    def close(self) -> None:
++        with self._lock:
++            if self._closed:
++                return
++            self._closed = True
++            self._conn.close()
+diff --git a/backend/app/metrics/storage.py b/backend/app/metrics/storage.py
+index 3099370..5699f3c 100644
+--- a/backend/app/metrics/storage.py
++++ b/backend/app/metrics/storage.py
+@@ -1,7 +1,8 @@
+ import sqlite3
+ import math
+ from contextlib import contextmanager
+-from typing import List, Dict, Any, Optional, Generator
++from typing import List, Dict, Any, Optional, Generator, Union
++from ..memdb import InMemoryDatabase
+ from ..schemas import RequestRecord, MetricsSummary, ModelStats
+ 
+ # Columns added after the original schema, with their SQLite types. Existing
+@@ -48,12 +49,16 @@ class SQLiteMetricsStore:
+     and routing metrics.
+     """
+ 
+-    def __init__(self, db_path: str):
++    def __init__(self, db_path: Union[str, InMemoryDatabase]):
+         self.db_path = db_path
+         self._init_db()
+ 
+     @contextmanager
+     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
++        if isinstance(self.db_path, InMemoryDatabase):
++            with self.db_path.connection() as conn:
++                yield conn
++            return
+         conn = sqlite3.connect(self.db_path, timeout=30)
+         conn.row_factory = sqlite3.Row
+         try:
+diff --git a/backend/app/schemas.py b/backend/app/schemas.py
+index aa54748..2439267 100644
+--- a/backend/app/schemas.py
++++ b/backend/app/schemas.py
+@@ -11,9 +11,19 @@ class HealthResponse(BaseModel):
+     llm_configured: Optional[bool] = None
+     database_ok: Optional[bool] = None
+     document_count: Optional[int] = None
++    active_sessions: Optional[int] = None
+     environment: Optional[str] = None
+ 
+ 
++class SessionOut(BaseModel):
++    # Returned only when the session is created; never echoed afterwards.
++    session_token: Optional[str] = None
++    expires_in_seconds: int
++    idle_ttl_seconds: int
++    max_documents: int
++    max_upload_mb: float
++
++
+ class QueryRequest(BaseModel):
+     query: str = Field(
+         ..., min_length=1,max_length=8000,
+diff --git a/backend/app/services/query_service.py b/backend/app/services/query_service.py
+index a86af67..c2c7609 100644
+--- a/backend/app/services/query_service.py
++++ b/backend/app/services/query_service.py
+@@ -34,6 +34,26 @@ def build_groq_client() -> Optional[Groq]:
+     )
+ 
+ 
++def build_embedding_provider():
++    if settings.SIMULATED_CACHE:
++        from ..cache.embeddings import SimulatedEmbeddingProvider
++        return SimulatedEmbeddingProvider(settings.SIMULATED_EMBEDDING_DIM)
++    return get_embedding_provider(
++        provider_type=settings.EMBEDDING_PROVIDER,
++        model_name=settings.EMBEDDING_MODEL_NAME,
++        dimension=settings.SIMULATED_EMBEDDING_DIM,
++    )
++
++
++def build_llm_gateway() -> LLMGateway:
++    return LLMGateway(
++        client=build_groq_client(),
++        max_completion_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
++        fallback_enabled=settings.LLM_FALLBACK_ENABLED,
++        availability_ttl_seconds=settings.MODEL_AVAILABILITY_TTL_SECONDS,
++    )
++
++
+ def provider_error_response(exc: GenerationFailed) -> HTTPException:
+     """Map a generation failure to a safe HTTP error (no provider details)."""
+     if exc.category == NOT_CONFIGURED:
+@@ -60,16 +80,7 @@ class QueryService:
+         gateway: Optional[LLMGateway] = None,
+     ):
+         if cache is None:
+-            if settings.SIMULATED_CACHE:
+-                from ..cache.embeddings import SimulatedEmbeddingProvider
+-                provider = SimulatedEmbeddingProvider(settings.SIMULATED_EMBEDDING_DIM)
+-            else:
+-                provider = get_embedding_provider(
+-                    provider_type=settings.EMBEDDING_PROVIDER,
+-                    model_name=settings.EMBEDDING_MODEL_NAME,
+-                    dimension=settings.SIMULATED_EMBEDDING_DIM,
+-                )
+-
++            provider = build_embedding_provider()
+             cache = SemanticCache(
+                 embedding_provider=provider,
+                 default_threshold=settings.SIMILARITY_THRESHOLD,
+@@ -84,17 +95,9 @@ class QueryService:
+         )
+         # A missing API key no longer stops the app from starting: document
+         # management and telemetry still work, and generation returns 503.
+-        self.gateway = gateway or LLMGateway(
+-            client=build_groq_client(),
+-            max_completion_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
+-            fallback_enabled=settings.LLM_FALLBACK_ENABLED,
+-            availability_ttl_seconds=settings.MODEL_AVAILABILITY_TTL_SECONDS,
+-        )
+-        if not self.gateway.is_configured:
+-            logger.warning("llm_not_configured")
+-
++        self.gateway = gateway or build_llm_gateway()
+         provider = self.cache.embedding_provider
+-        logger.info(
++        logger.debug(
+             f"Embedding provider: {provider.provider_name} | "
+             f"Simulated: {provider.is_simulated} | "
+             f"Dimension: {provider.dimension}"
+diff --git a/backend/app/sessions.py b/backend/app/sessions.py
+new file mode 100644
+index 0000000..c72235c
+--- /dev/null
++++ b/backend/app/sessions.py
+@@ -0,0 +1,185 @@
++"""Per-visitor sessions with private, in-memory workspaces.
++
++Every browser session gets its own workspace: a document store, vector
++index, semantic cache and telemetry store on a private in-memory SQLite
++database (see memdb.py). Nothing is shared between workspaces except
++stateless components (embedding model, router, LLM gateway), so one visitor's
++documents, answers, cached answers and request history cannot be reached
++from another session.
++
++Session tokens are minted by the server with 256 bits of randomness and are
++the only way to reach a workspace. Clients cannot choose a token, and only a
++SHA-256 hash of each token is kept, so the session table never holds a
++usable credential. Unknown, expired or malformed tokens are rejected.
++"""
++
++import hashlib
++import logging
++import re
++import secrets
++import threading
++import time
++from collections import OrderedDict
++from dataclasses import dataclass, field
++from typing import Callable, Optional, Tuple
++
++from .memdb import InMemoryDatabase
++
++logger = logging.getLogger("cost_aware_rag.sessions")
++
++# token_urlsafe(32) yields 43 URL-safe characters.
++_TOKEN_FORMAT = re.compile(r"^[A-Za-z0-9_-]{43}$")
++_SWEEP_INTERVAL_SECONDS = 30.0
++
++
++def hash_token(token: str) -> str:
++    return hashlib.sha256(token.encode("ascii")).hexdigest()
++
++
++@dataclass
++class Workspace:
++    db: InMemoryDatabase
++    query_service: object
++    rag: object
++    created_at: float
++    last_seen: float
++    # Short, non-reversible label for logs; never the token itself.
++    label: str = ""
++    upload_lock: threading.Lock = field(default_factory=threading.Lock)
++
++    def close(self) -> None:
++        self.db.close()
++
++
++WorkspaceFactory = Callable[[InMemoryDatabase], Tuple[object, object]]
++
++
++class SessionManager:
++    def __init__(
++        self,
++        factory: WorkspaceFactory,
++        idle_ttl_seconds: float,
++        max_age_seconds: float,
++        max_active: int,
++        clock: Callable[[], float] = time.monotonic,
++    ):
++        self._factory = factory
++        self.idle_ttl_seconds = idle_ttl_seconds
++        self.max_age_seconds = max_age_seconds
++        self.max_active = max(1, max_active)
++        self._clock = clock
++        # Least recently used first.
++        self._sessions: "OrderedDict[str, Workspace]" = OrderedDict()
++        self._lock = threading.Lock()
++        self._last_sweep = clock()
++
++    # ---------------------------------------------------------------- public
++
++    def create(self) -> Tuple[str, Workspace]:
++        token = secrets.token_urlsafe(32)
++        key = hash_token(token)
++        db = InMemoryDatabase()
++        try:
++            query_service, rag = self._factory(db)
++        except Exception:
++            db.close()
++            raise
++        now = self._clock()
++        workspace = Workspace(
++            db=db,
++            query_service=query_service,
++            rag=rag,
++            created_at=now,
++            last_seen=now,
++            label=key[:8],
++        )
++        evicted = []
++        with self._lock:
++            self._sweep_locked(now, force=True, closed=evicted)
++            while len(self._sessions) >= self.max_active:
++                _, oldest = self._sessions.popitem(last=False)
++                evicted.append(oldest)
++            self._sessions[key] = workspace
++        for ws in evicted:
++            ws.close()
++        if evicted:
++            logger.info("sessions_closed", extra={"count": len(evicted)})
++        logger.info("session_created", extra={"session": workspace.label})
++        return token, workspace
++
++    def get(self, token: Optional[str]) -> Optional[Workspace]:
++        if not token or not _TOKEN_FORMAT.match(token):
++            return None
++        key = hash_token(token)
++        now = self._clock()
++        expired = []
++        with self._lock:
++            self._sweep_locked(now, force=False, closed=expired)
++            workspace = self._sessions.get(key)
++            if workspace is not None and self._is_expired(workspace, now):
++                del self._sessions[key]
++                expired.append(workspace)
++                workspace = None
++            if workspace is not None:
++                workspace.last_seen = now
++                self._sessions.move_to_end(key)
++        for ws in expired:
++            ws.close()
++        return workspace
++
++    def close(self, token: Optional[str]) -> bool:
++        if not token or not _TOKEN_FORMAT.match(token):
++            return False
++        with self._lock:
++            workspace = self._sessions.pop(hash_token(token), None)
++        if workspace is None:
++            return False
++        workspace.close()
++        logger.info("session_closed", extra={"session": workspace.label})
++        return True
++
++    def expires_in(self, workspace: Workspace) -> float:
++        now = self._clock()
++        return max(
++            0.0,
++            min(
++                workspace.last_seen + self.idle_ttl_seconds,
++                workspace.created_at + self.max_age_seconds,
++            )
++            - now,
++        )
++
++    @property
++    def active_count(self) -> int:
++        with self._lock:
++            return len(self._sessions)
++
++    def sweep(self) -> int:
++        closed = []
++        with self._lock:
++            self._sweep_locked(self._clock(), force=True, closed=closed)
++        for ws in closed:
++            ws.close()
++        return len(closed)
++
++    def close_all(self) -> None:
++        with self._lock:
++            workspaces = list(self._sessions.values())
++            self._sessions.clear()
++        for ws in workspaces:
++            ws.close()
++
++    # -------------------------------------------------------------- internal
++
++    def _is_expired(self, workspace: Workspace, now: float) -> bool:
++        return (
++            now - workspace.last_seen >= self.idle_ttl_seconds
++            or now - workspace.created_at >= self.max_age_seconds
++        )
++
++    def _sweep_locked(self, now: float, force: bool, closed: list) -> None:
++        if not force and now - self._last_sweep < _SWEEP_INTERVAL_SECONDS:
++            return
++        self._last_sweep = now
++        for key in [k for k, ws in self._sessions.items() if self._is_expired(ws, now)]:
++            closed.append(self._sessions.pop(key))
+diff --git a/backend/tests/conftest.py b/backend/tests/conftest.py
+index 6bc2a56..f0d6390 100644
+--- a/backend/tests/conftest.py
++++ b/backend/tests/conftest.py
+@@ -6,14 +6,24 @@ from typing import Dict, List, Optional
+ import pytest
+ from fastapi.testclient import TestClient
+ 
+-from app.api.routes import build_rag_service, get_query_service, get_rag_service
++from app.api.routes import (
++    SharedComponents,
++    build_rag_service,
++    build_workspace_services,
++    get_query_service,
++    get_rag_service,
++    get_session_manager,
++    get_shared,
++)
+ from app.cache.embeddings import SimulatedEmbeddingProvider
+ from app.cache.semantic import SemanticCache
+ from app.llm import LLMGateway
+ from app.main import app
+ from app.metrics.storage import SQLiteMetricsStore
+ from app.rate_limit import limiter
++from app.routing import CostAwareRouter
+ from app.services.query_service import QueryService
++from app.sessions import SessionManager
+ 
+ 
+ def pytest_configure(config):
+@@ -124,6 +134,9 @@ def api(services):
+     qs, rag = services
+     app.dependency_overrides[get_query_service] = lambda: qs
+     app.dependency_overrides[get_rag_service] = lambda: rag
++    app.dependency_overrides[get_shared] = lambda: SharedComponents(
++        qs.cache.embedding_provider, qs.router, qs.gateway
++    )
+     limiter.reset()
+     with TestClient(app, raise_server_exceptions=False) as client:
+         client.qs = qs
+@@ -133,9 +146,59 @@ def api(services):
+     limiter.reset()
+ 
+ 
+-def upload(client, filename: str, data: bytes, collection: str = "default"):
++class SessionHarness:
++    """The real session manager wired to simulated embeddings and a FakeLLM
++    per workspace, so tests exercise the production isolation path."""
++
++    def __init__(self):
++        self.now = 1000.0
++        self.shared = SharedComponents(
++            embedding_provider=SimulatedEmbeddingProvider(dimension=256),
++            router=CostAwareRouter(),
++            gateway=LLMGateway(client=None, max_completion_tokens=512),
++        )
++        self.fakes: List[FakeLLM] = []
++        self.manager = SessionManager(
++            factory=self._factory,
++            idle_ttl_seconds=1800,
++            max_age_seconds=6 * 3600,
++            max_active=50,
++            clock=lambda: self.now,
++        )
++
++    def _factory(self, db):
++        qs, rag = build_workspace_services(self.shared, db)
++        fake = FakeLLM()
++        rag._generate = fake
++        rag.fake_llm = fake
++        self.fakes.append(fake)
++        return qs, rag
++
++
++@pytest.fixture
++def sessions():
++    harness = SessionHarness()
++    app.dependency_overrides[get_session_manager] = lambda: harness.manager
++    app.dependency_overrides[get_shared] = lambda: harness.shared
++    limiter.reset()
++    with TestClient(app, raise_server_exceptions=False) as client:
++        harness.client = client
++        yield harness
++    harness.manager.close_all()
++    app.dependency_overrides.clear()
++    limiter.reset()
++
++
++def new_session(client) -> Dict[str, str]:
++    res = client.post("/api/session")
++    assert res.status_code == 201, res.text
++    return {"X-Session-Token": res.json()["session_token"]}
++
++
++def upload(client, filename: str, data: bytes, collection: str = "default", headers=None):
+     return client.post(
+         "/api/documents",
+         files={"file": (filename, data, "application/octet-stream")},
+         data={"collection": collection},
++        headers=headers,
+     )
+diff --git a/backend/tests/test_api.py b/backend/tests/test_api.py
+index bbb6d49..832a87f 100644
+--- a/backend/tests/test_api.py
++++ b/backend/tests/test_api.py
+@@ -1,7 +1,7 @@
+ import pytest
+ from fastapi.testclient import TestClient
+ from app.main import app
+-from app.api.routes import get_query_service
++from app.api.routes import SharedComponents, get_query_service, get_shared
+ from app.services.query_service import QueryService
+ from app.cache.semantic import SemanticCache
+ from app.cache.embeddings import (
+@@ -39,6 +39,9 @@ def _make_client(provider):
+     )
+ 
+     app.dependency_overrides[get_query_service] = lambda: test_service
++    app.dependency_overrides[get_shared] = lambda: SharedComponents(
++        provider, test_service.router, test_service.gateway
++    )
+     limiter.reset()
+     return path
+ 
+diff --git a/backend/tests/test_sessions.py b/backend/tests/test_sessions.py
+new file mode 100644
+index 0000000..aced3e0
+--- /dev/null
++++ b/backend/tests/test_sessions.py
+@@ -0,0 +1,305 @@
++"""Per-visitor session isolation and cleanup, through the real session
++manager and HTTP API. Each workspace uses simulated embeddings and a
++FakeLLM, so no network, key or cost is involved."""
++
++import glob
++import os
++
++import pytest
++
++from app.api import routes
++from app.config import settings
++from app.memdb import InMemoryDatabase, WorkspaceClosed
++from tests.conftest import new_session, upload
++from tests.pdf_utils import make_pdf
++
++MANUAL_PDF = make_pdf([
++    "Orion Lab Manual. Experiment 1: Measure the resistance with the Orion R7 meter.",
++    "Experiment 2: The Orion R7 meter must be calibrated every 90 days by the lab technician.",
++])
++QUESTION = "How often must the Orion R7 meter be calibrated?"
++
++
++def ask(client, headers, query=QUESTION, **kwargs):
++    res = client.post(
++        "/api/rag/query",
++        json={"query": query, "min_relevance": 0.15, **kwargs},
++        headers=headers,
++    )
++    assert res.status_code == 200, res.text
++    return res.json()
++
++
++@pytest.fixture
++def visitor_a(sessions):
++    client = sessions.client
++    a = new_session(client)
++    res = upload(client, "orion-manual.pdf", MANUAL_PDF, headers=a)
++    assert res.status_code == 202, res.text
++    doc_id = res.json()["document"]["document_id"]
++    assert client.get(f"/api/documents/{doc_id}", headers=a).json()["status"] == "ready"
++    body = ask(client, a)
++    assert body["outcome"] == "answered"
++    assert "90 days" in body["answer"]
++    return {"headers": a, "doc_id": doc_id, "answer": body}
++
++
++# ------------------------------------------------------- 1-3: A and B
++
++
++def test_visitor_a_gets_a_grounded_cited_answer(sessions, visitor_a):
++    body = visitor_a["answer"]
++    assert body["citations"][0]["filename"] == "orion-manual.pdf"
++    assert body["citations"][0]["page_number"] == 2
++    assert body["usage"]["estimated_cost"] > 0
++    assert body["routing"]["selected_model"]
++
++
++def test_visitor_b_starts_with_an_empty_workspace(sessions, visitor_a):
++    client = sessions.client
++    b = new_session(client)
++    assert client.get("/api/documents", headers=b).json() == []
++    assert client.get("/api/collections", headers=b).json() == []
++    assert client.get("/api/metrics/requests", headers=b).json() == []
++    assert client.get("/api/metrics/summary", headers=b).json()["total_requests"] == 0
++
++
++def test_visitor_b_cannot_reach_visitor_a_data_through_the_api(sessions, visitor_a):
++    client = sessions.client
++    b = new_session(client)
++    doc_id = visitor_a["doc_id"]
++    assert client.get(f"/api/documents/{doc_id}", headers=b).status_code == 404
++    assert client.delete(f"/api/documents/{doc_id}", headers=b).status_code == 404
++    assert client.post(f"/api/documents/{doc_id}/reindex", headers=b).status_code == 404
++    assert client.post(
++        "/api/rag/query", json={"query": QUESTION, "document_ids": [doc_id]}, headers=b
++    ).status_code == 404
++
++    body = ask(client, b)
++    assert body["outcome"] == "no_documents"
++    assert body["cache"]["hit"] is False
++    assert "90 days" not in body["answer"]
++    assert body["citations"] == []
++
++    # A's document is untouched by B's attempts.
++    a = visitor_a["headers"]
++    assert client.get(f"/api/documents/{doc_id}", headers=a).json()["status"] == "ready"
++
++
++def test_requests_without_a_valid_session_are_rejected(sessions, visitor_a):
++    client = sessions.client
++    forged = {"X-Session-Token": "A" * 43}
++    for headers in ({}, forged, {"X-Session-Token": "short"}, {"X-Session-Token": "x" * 500}):
++        assert client.get("/api/documents", headers=headers).status_code == 401
++        assert client.post("/api/rag/query", json={"query": QUESTION}, headers=headers).status_code == 401
++        assert client.get("/api/metrics/requests", headers=headers).status_code == 401
++        assert upload(client, "x.txt", b"some text here", headers=headers).status_code == 401
++    # A guessed token that looks valid still cannot delete A's session.
++    assert client.delete("/api/session", headers=forged).status_code == 401
++    assert client.get("/api/documents", headers=visitor_a["headers"]).status_code == 200
++
++
++def test_tokens_are_server_issued_unique_and_not_stored(sessions):
++    client = sessions.client
++    tokens = {new_session(client)["X-Session-Token"] for _ in range(5)}
++    assert len(tokens) == 5
++    stored = set(sessions.manager._sessions)
++    assert not (tokens & stored)  # only hashes are kept
++    # GET /api/session does not echo the token back.
++    headers = {"X-Session-Token": next(iter(tokens))}
++    assert client.get("/api/session", headers=headers).json()["session_token"] is None
++
++
++def test_health_reports_no_visitor_data(sessions, visitor_a):
++    health = sessions.client.get("/health").json()
++    assert health["document_count"] is None
++    assert health["active_sessions"] == 1
++
++
++# ----------------------------------------------------- 4: refresh = new
++
++
++def test_a_new_session_after_refresh_is_empty(sessions, visitor_a):
++    # The frontend keeps the token only in memory, so a refresh starts a
++    # new session; the old one stays private until it expires.
++    client = sessions.client
++    fresh = new_session(client)
++    assert client.get("/api/documents", headers=fresh).json() == []
++    assert ask(client, fresh)["outcome"] == "no_documents"
++
++
++# ------------------------------------------------------------ 5: reset
++
++
++def test_reset_deletes_the_session_and_its_data(sessions, visitor_a):
++    client = sessions.client
++    a = visitor_a["headers"]
++    workspace = sessions.manager.get(a["X-Session-Token"])
++    assert client.delete("/api/session", headers=a).status_code == 200
++    assert client.get("/api/documents", headers=a).status_code == 401
++    assert sessions.manager.active_count == 0
++    assert workspace.db.closed
++    with pytest.raises(WorkspaceClosed):
++        workspace.rag.store.list(None)
++
++
++def test_beacon_close_ends_the_session(sessions, visitor_a):
++    client = sessions.client
++    a = visitor_a["headers"]
++    res = client.post("/api/session/close", content=a["X-Session-Token"],
++                      headers={"Content-Type": "text/plain"})
++    assert res.status_code == 204
++    assert client.get("/api/documents", headers=a).status_code == 401
++    # Unknown tokens get the same response.
++    assert client.post("/api/session/close", content="nope").status_code == 204
++
++
++def test_idle_and_old_sessions_expire_and_are_freed(sessions, visitor_a):
++    client = sessions.client
++    a = visitor_a["headers"]
++    workspace = sessions.manager.get(a["X-Session-Token"])
++    sessions.now += 1800  # idle TTL
++    assert client.get("/api/documents", headers=a).status_code == 401
++    assert workspace.db.closed
++
++    b = new_session(client)
++    for _ in range(13):  # stay active, but exceed the 6 h maximum age
++        sessions.now += 1700
++        client.get("/api/session", headers=b)
++    assert client.get("/api/documents", headers=b).status_code == 401
++
++
++def test_session_count_is_bounded(sessions):
++    sessions.manager.max_active = 3
++    client = sessions.client
++    first = new_session(client)
++    for _ in range(3):
++        new_session(client)
++    assert sessions.manager.active_count == 3
++    assert client.get("/api/documents", headers=first).status_code == 401
++
++
++def test_per_session_upload_quota(sessions, monkeypatch):
++    monkeypatch.setattr(settings, "SESSION_MAX_DOCUMENTS", 2)
++    client = sessions.client
++    a = new_session(client)
++    assert upload(client, "one.txt", b"first document text", headers=a).status_code == 202
++    assert upload(client, "two.txt", b"second document text", headers=a).status_code == 202
++    assert upload(client, "three.txt", b"third document text", headers=a).status_code == 409
++    # Replacing an existing file is still allowed.
++    assert upload(client, "two.txt", b"second document, revised", headers=a).status_code == 202
++    # Another session has its own quota.
++    b = new_session(client)
++    assert upload(client, "three.txt", b"third document text", headers=b).status_code == 202
++
++
++def test_processing_after_reset_does_not_crash(sessions):
++    client = sessions.client
++    a = new_session(client)
++    workspace = sessions.manager.get(a["X-Session-Token"])
++    sessions.manager.close(a["X-Session-Token"])
++    # The background task would run after the session ended.
++    routes._process_upload(workspace.rag.ingestion, "doc_missing", 1, b"text")
++
++
++# ---------------------------------------------------------- 6: restart
++
++
++def test_restart_clears_all_session_data(sessions, visitor_a):
++    client = sessions.client
++    a = visitor_a["headers"]
++    old_manager = sessions.manager
++    # A restart builds a fresh manager; nothing is reloaded from anywhere.
++    old_manager.close_all()
++    from tests.conftest import SessionHarness
++
++    restarted = SessionHarness()
++    from app.main import app
++
++    app.dependency_overrides[routes.get_session_manager] = lambda: restarted.manager
++    assert client.get("/api/documents", headers=a).status_code == 401
++    b = new_session(client)
++    assert client.get("/api/documents", headers=b).json() == []
++    restarted.manager.close_all()
++
++
++def test_session_data_never_touches_disk(sessions, tmp_path, monkeypatch):
++    monkeypatch.chdir(tmp_path)
++    before = set(glob.glob(os.path.join(os.path.dirname(settings.DATABASE_PATH), "*.db*")))
++    client = sessions.client
++    a = new_session(client)
++    upload(client, "orion-manual.pdf", MANUAL_PDF, headers=a)
++    ask(client, a)
++    after = set(glob.glob(os.path.join(os.path.dirname(settings.DATABASE_PATH), "*.db*")))
++    assert after == before
++    assert list(tmp_path.iterdir()) == []
++    workspace = sessions.manager.get(a["X-Session-Token"])
++    assert isinstance(workspace.db, InMemoryDatabase)
++
++
++# ---------------------------------------------------- 7: cache isolation
++
++
++def test_cache_hits_never_cross_sessions(sessions, visitor_a):
++    client = sessions.client
++    a = visitor_a["headers"]
++    # A's repeat is served from A's own cache.
++    assert ask(client, a)["cache"]["hit"] is True
++
++    # B uploads the very same file and asks the very same question: B must
++    # get a freshly generated answer from B's own workspace, not A's entry.
++    b = new_session(client)
++    upload(client, "orion-manual.pdf", MANUAL_PDF, headers=b)
++    body = ask(client, b)
++    assert body["cache"]["hit"] is False
++    b_fake = sessions.fakes[-1]
++    assert len(b_fake.calls) == 1
++
++    # General (non-document) mode is per session too.
++    for headers in (a, b):
++        client.post("/api/query", json={"query": "What is retrieval augmented generation?"}, headers=headers)
++    general_b = client.get("/api/metrics/requests", params={"mode": "general"}, headers=b).json()
++    assert len(general_b) == 1 and general_b[0]["cache_hit"] is False
++
++
++def test_metrics_are_per_session(sessions, visitor_a):
++    client = sessions.client
++    a = visitor_a["headers"]
++    b = new_session(client)
++    ask(client, b)
++    a_records = client.get("/api/metrics/requests", headers=a).json()
++    b_records = client.get("/api/metrics/requests", headers=b).json()
++    assert [r["outcome"] for r in a_records] == ["answered"]
++    assert [r["outcome"] for r in b_records] == ["no_documents"]
++    assert QUESTION in a_records[0]["query"] or not settings.TELEMETRY_STORE_QUERY_TEXT
++
++
++# ------------------------------------------------- 8: features still work
++
++
++def test_rag_citations_routing_and_costs_still_work_in_a_session(sessions, visitor_a):
++    client = sessions.client
++    a = visitor_a["headers"]
++    compare = ask(client, a, "Compare the purpose of experiment 1 and experiment 2 in the Orion manual, and explain why calibration matters.")
++    assert compare["routing"]["selected_model"] == sessions.shared.router.complex.model_id
++    assert compare["citations"]
++    summary = client.get("/api/metrics/summary", params={"mode": "rag"}, headers=a).json()
++    assert summary["total_requests"] == 2
++    assert summary["total_estimated_spend"] > 0
++    assert client.delete(f"/api/documents/{visitor_a['doc_id']}", headers=a).status_code == 200
++    assert client.get("/api/documents", headers=a).json() == []
++
++
++def test_in_memory_database_rolls_back_unfinished_work():
++    db = InMemoryDatabase()
++    with db.connection() as conn:
++        conn.execute("CREATE TABLE t (x INTEGER)")
++        conn.commit()
++    with db.connection() as conn:
++        conn.execute("INSERT INTO t VALUES (1)")  # never committed
++    with db.connection() as conn:
++        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
++    db.close()
++    with pytest.raises(WorkspaceClosed):
++        with db.connection():
++            pass
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 5912927..50f2676 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -17,7 +17,9 @@ import {
+   fetchMetricsSummary,
+   fetchRecentRequests,
+   submitQuery,
+-  resetMetrics,
++  resetSession,
++  onSessionReset,
++  endSessionOnPageHide,
+ } from './api/client';
+ import {
+   CollectionInfo,
+@@ -50,6 +52,30 @@ export function App() {
+   const [docsLoading, setDocsLoading] = useState(false);
+   const [docsError, setDocsError] = useState<string | null>(null);
+   const [collection, setCollection] = useState('default');
++  // Bumped whenever the server-side workspace is replaced, to clear every
++  // component's local state (chat turns, upload notices, filters).
++  const [sessionEpoch, setSessionEpoch] = useState(0);
++  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
++
++  useEffect(() => endSessionOnPageHide(), []);
++
++  useEffect(
++    () =>
++      onSessionReset((reason) => {
++        setDocuments([]);
++        setCollections([]);
++        setMetrics(null);
++        setRequests([]);
++        setCollection('default');
++        setSessionEpoch((e) => e + 1);
++        setSessionNotice(
++          reason === 'expired'
++            ? 'Your session expired, so its documents and answers were deleted. You are now in a new, empty workspace.'
++            : 'Started a fresh session. Your previous documents, answers and telemetry were deleted from the server.'
++        );
++      }),
++    []
++  );
+ 
+   useEffect(() => {
+     const onHash = () => setTab(tabFromHash());
+@@ -98,12 +124,15 @@ export function App() {
+     // Poll metrics every 15 seconds for real-time observability
+     const interval = setInterval(loadData, 15000);
+     return () => clearInterval(interval);
+-  }, [loadData]);
++  }, [loadData, sessionEpoch]);
+ 
+   useEffect(() => {
+     loadDocuments();
++  }, [loadDocuments, sessionEpoch]);
++
++  useEffect(() => {
+     fetchConfig().then(setConfig).catch(() => setConfig(null));
+-  }, [loadDocuments]);
++  }, []);
+ 
+   // Poll while any document is still being processed.
+   const anyProcessing = documents.some((d) => d.status === 'pending' || d.status === 'processing');
+@@ -141,13 +170,12 @@ export function App() {
+   };
+ 
+   const handleReset = async () => {
+-    if (window.confirm('Reset all telemetry and flush the semantic cache? Documents are kept.')) {
+-      try {
+-        await resetMetrics();
+-        await loadData();
+-      } catch (err) {
+-        alert(err instanceof Error ? err.message : 'Failed to reset metrics.');
+-      }
++    if (
++      window.confirm(
++        'Start a fresh session? This deletes your uploaded documents, answers, cached answers and telemetry from the server.'
++      )
++    ) {
++      await resetSession();
+     }
+   };
+ 
+@@ -167,7 +195,16 @@ export function App() {
+         onTabChange={changeTab}
+       />
+ 
+-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
++      <main key={sessionEpoch} className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
++        {sessionNotice && (
++          <div role="status" className="flex items-start justify-between gap-3 rounded-lg border border-sky-900/60 bg-sky-950/30 px-4 py-3 text-sm text-sky-200">
++            <span>{sessionNotice}</span>
++            <button type="button" onClick={() => setSessionNotice(null)} className="text-xs text-sky-300 hover:text-sky-100">
++              Dismiss
++            </button>
++          </div>
++        )}
++
+         {tab === 'ask' && (
+           <AskPanel
+             collection={collection}
+diff --git a/frontend/src/api/client.ts b/frontend/src/api/client.ts
+index 43c9baf..c8473ea 100644
+--- a/frontend/src/api/client.ts
++++ b/frontend/src/api/client.ts
+@@ -9,6 +9,7 @@ import {
+   RAGQueryRequest,
+   RAGQueryResponse,
+   RequestRecordExtended,
++  SessionInfo,
+   UploadResult,
+ } from './types';
+ 
+@@ -41,13 +42,115 @@ async function readError(res: Response, fallback: string): Promise<ApiError> {
+   return new ApiError(res.status, message);
+ }
+ 
+-async function request<T>(path: string, init: RequestInit | undefined, fallback: string): Promise<T> {
++// ------------------------------------------------------------------ session
++//
++// Each page load gets its own private workspace on the server. The token
++// lives only in this module's memory: it is never written to localStorage,
++// sessionStorage or cookies, so a refresh or a new tab starts empty.
++
++export const SESSION_HEADER = 'X-Session-Token';
++
++let sessionToken: string | null = null;
++let sessionStartedAt = 0;
++let sessionPromise: Promise<string> | null = null;
++const resetListeners = new Set<(reason: 'expired' | 'reset') => void>();
++
++/** Called when the workspace is gone (expired, evicted, or reset by the user). */
++export function onSessionReset(listener: (reason: 'expired' | 'reset') => void): () => void {
++  resetListeners.add(listener);
++  return () => resetListeners.delete(listener);
++}
++
++async function startSession(): Promise<string> {
+   let res: Response;
+   try {
+-    res = await fetch(`${BASE_URL}${path}`, init);
++    res = await fetch(`${BASE_URL}/api/session`, { method: 'POST' });
+   } catch {
+     throw new ApiError(0, 'Could not reach the API. Check that the backend is running.');
+   }
++  if (!res.ok) throw await readError(res, 'Could not start a session');
++  const body = (await res.json()) as SessionInfo;
++  if (!body.session_token) throw new ApiError(500, 'The server did not return a session token.');
++  sessionToken = body.session_token;
++  sessionStartedAt = Date.now();
++  return sessionToken;
++}
++
++function getSessionToken(): Promise<string> {
++  if (sessionToken) return Promise.resolve(sessionToken);
++  if (!sessionPromise) {
++    sessionPromise = startSession().finally(() => {
++      sessionPromise = null;
++    });
++  }
++  return sessionPromise;
++}
++
++function forgetSession(token: string, reason: 'expired' | 'reset') {
++  // Several in-flight requests can fail with the same dead token; reset once.
++  if (sessionToken !== token) return;
++  sessionToken = null;
++  // A session rejected moments after it was created points to a server
++  // problem, not an expiry; resetting again would only loop.
++  if (reason === 'expired' && Date.now() - sessionStartedAt < 5000) return;
++  resetListeners.forEach((l) => l(reason));
++}
++
++/** Delete this workspace on the server; the next request starts a new one. */
++export async function resetSession(): Promise<void> {
++  const token = sessionToken;
++  if (!token) return;
++  try {
++    await fetch(`${BASE_URL}/api/session`, { method: 'DELETE', headers: { [SESSION_HEADER]: token } });
++  } catch {
++    // The server-side session expires on its own if this request is lost.
++  }
++  forgetSession(token, 'reset');
++}
++
++/** Best-effort cleanup when the tab is closed or reloaded. Beacons cannot
++ * set headers, so the token travels as the plain-text body. */
++export function endSessionOnPageHide(): () => void {
++  const handler = () => {
++    if (sessionToken && typeof navigator !== 'undefined' && navigator.sendBeacon) {
++      navigator.sendBeacon(`${BASE_URL}/api/session/close`, sessionToken);
++      sessionToken = null;
++    }
++  };
++  window.addEventListener('pagehide', handler);
++  return () => window.removeEventListener('pagehide', handler);
++}
++
++/** Test helper: forget the in-memory session without calling the server. */
++export function __clearSessionForTests() {
++  sessionToken = null;
++  sessionStartedAt = 0;
++  sessionPromise = null;
++  resetListeners.clear();
++}
++
++async function request<T>(
++  path: string,
++  init: RequestInit | undefined,
++  fallback: string,
++  withSession = true
++): Promise<T> {
++  let token: string | null = null;
++  let finalInit = init;
++  if (withSession) {
++    token = await getSessionToken();
++    finalInit = { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), [SESSION_HEADER]: token } };
++  }
++  let res: Response;
++  try {
++    res = await fetch(`${BASE_URL}${path}`, finalInit);
++  } catch {
++    throw new ApiError(0, 'Could not reach the API. Check that the backend is running.');
++  }
++  if (res.status === 401 && token) {
++    forgetSession(token, 'expired');
++    throw new ApiError(401, 'Your session expired, so its documents and answers were deleted. Upload your files again.');
++  }
+   if (!res.ok) throw await readError(res, fallback);
+   return res.json() as Promise<T>;
+ }
+@@ -59,11 +162,11 @@ const json = (body: unknown): RequestInit => ({
+ });
+ 
+ export function fetchHealth(): Promise<HealthDetails> {
+-  return request('/health', undefined, 'Health check failed');
++  return request('/health', undefined, 'Health check failed', false);
+ }
+ 
+ export function fetchConfig(): Promise<PublicConfig> {
+-  return request('/api/config', undefined, 'Failed to load configuration');
++  return request('/api/config', undefined, 'Failed to load configuration', false);
+ }
+ 
+ export function fetchMetricsSummary(mode?: string): Promise<MetricsSummaryExtended> {
+diff --git a/frontend/src/api/types.ts b/frontend/src/api/types.ts
+index 747fdfc..a7124d4 100644
+--- a/frontend/src/api/types.ts
++++ b/frontend/src/api/types.ts
+@@ -70,9 +70,18 @@ export interface HealthDetails extends HealthResponse {
+   llm_configured?: boolean | null;
+   database_ok?: boolean | null;
+   document_count?: number | null;
++  active_sessions?: number | null;
+   environment?: string | null;
+ }
+ 
++export interface SessionInfo {
++  session_token: string | null;
++  expires_in_seconds: number;
++  idle_ttl_seconds: number;
++  max_documents: number;
++  max_upload_mb: number;
++}
++
+ export interface ModelStats {
+   requests: number;
+   avg_latency_ms: number;
+@@ -142,6 +151,9 @@ export interface PublicConfig {
+   chunk_size_chars: number;
+   chunk_overlap_chars: number;
+   telemetry_stores_query_text: boolean;
++  session_idle_ttl_minutes?: number;
++  session_max_documents?: number;
++  session_max_upload_mb?: number;
+ }
+ 
+ export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
+diff --git a/frontend/src/components/Header.tsx b/frontend/src/components/Header.tsx
+index fd83627..a71387d 100644
+--- a/frontend/src/components/Header.tsx
++++ b/frontend/src/components/Header.tsx
+@@ -71,7 +71,8 @@ export const Header: React.FC<HeaderProps> = ({ health, isLoading, onRefresh, on
+             </button>
+             <button
+               onClick={onReset}
+-              title="Reset cache & telemetry (documents are kept)"
++              title="Start a fresh session (deletes your documents, answers and telemetry)"
++              aria-label="Start a fresh session"
+               className="p-2 text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-900/30 border border-rose-900/40 rounded-lg transition-colors"
+             >
+               <Trash2 className="w-4 h-4" />
+diff --git a/frontend/src/components/documents/DocumentManager.tsx b/frontend/src/components/documents/DocumentManager.tsx
+index 68cbe2b..6e204c4 100644
+--- a/frontend/src/components/documents/DocumentManager.tsx
++++ b/frontend/src/components/documents/DocumentManager.tsx
+@@ -130,7 +130,7 @@ export const DocumentManager: React.FC<DocumentManagerProps> = ({
+             <p className="mt-0.5 text-xs text-slate-400">
+               PDF or TXT, up to {maxMb} MB. Text is extracted page by page, split into
+               {config ? ` ${config.chunk_size_chars}-character` : ''} overlapping chunks and embedded
+-              {config ? ` with ${config.embedding_provider}` : ''}. Files are processed on the API server only.
++              {config ? ` with ${config.embedding_provider}` : ''}. Files are processed on the API server and kept only in this browser session's private, in-memory workspace: they are deleted when you start a fresh session, reload the page, stay idle for {config?.session_idle_ttl_minutes ?? 30} minutes, or the server restarts.
+             </p>
+           </div>
+           <div className="flex flex-wrap items-center gap-2">
+diff --git a/frontend/src/test/fixtures.ts b/frontend/src/test/fixtures.ts
+index 5755a98..ad99245 100644
+--- a/frontend/src/test/fixtures.ts
++++ b/frontend/src/test/fixtures.ts
+@@ -76,7 +76,16 @@ export function makeAnswer(overrides: Partial<RAGQueryResponse> = {}): RAGQueryR
+ type Handler = (url: string, init?: RequestInit) => unknown;
+ 
+ /** Install a fetch mock that routes by "METHOD path" prefix. */
+-export function mockApi(routes: Record<string, Handler | unknown>) {
++export const TEST_SESSION_TOKEN = 'T'.repeat(43);
++
++export function mockApi(customRoutes: Record<string, Handler | unknown>) {
++  const routes: Record<string, Handler | unknown> = {
++    'POST /api/session': {
++      session_token: TEST_SESSION_TOKEN, expires_in_seconds: 1800, idle_ttl_seconds: 1800,
++      max_documents: 10, max_upload_mb: 25,
++    },
++    ...customRoutes,
++  };
+   const calls: { method: string; url: string; init?: RequestInit }[] = [];
+   const fetchMock = async (input: RequestInfo | URL, init?: RequestInit) => {
+     const url = String(input);
+diff --git a/frontend/src/test/session.test.tsx b/frontend/src/test/session.test.tsx
+new file mode 100644
+index 0000000..0bceb4c
+--- /dev/null
++++ b/frontend/src/test/session.test.tsx
+@@ -0,0 +1,97 @@
++import React from 'react';
++import { describe, expect, it, vi } from 'vitest';
++import { fireEvent, render, screen, waitFor } from '@testing-library/react';
++import { App } from '../App';
++import { fetchDocuments, SESSION_HEADER } from '../api/client';
++import { makeDocument, mockApi, TEST_SESSION_TOKEN } from './fixtures';
++
++const quietRoutes = {
++  'GET /health': { status: 'healthy', version: '0.3.0', simulated_mode: false, timestamp: '' },
++  'GET /api/config': () => new Response('{}', { status: 500 }),
++  'GET /api/metrics/summary': () => new Response('{}', { status: 500 }),
++  'GET /api/metrics/requests': [],
++};
++
++function headerOf(init?: RequestInit): string | undefined {
++  return (init?.headers as Record<string, string> | undefined)?.[SESSION_HEADER];
++}
++
++describe('per-visitor sessions', () => {
++  it('starts one session and sends its token on every workspace request', async () => {
++    const calls = mockApi({ 'GET /api/documents': [] });
++    await Promise.all([fetchDocuments(), fetchDocuments(), fetchDocuments()]);
++    expect(calls.filter((c) => c.method === 'POST' && c.url.endsWith('/api/session'))).toHaveLength(1);
++    const docCalls = calls.filter((c) => c.url.includes('/api/documents'));
++    expect(docCalls).toHaveLength(3);
++    docCalls.forEach((c) => expect(headerOf(c.init)).toBe(TEST_SESSION_TOKEN));
++  });
++
++  it('never writes the token or any data to browser storage', async () => {
++    const setLocal = vi.spyOn(Storage.prototype, 'setItem');
++    mockApi({ ...quietRoutes, 'GET /api/collections': [], 'GET /api/documents': [makeDocument()] });
++    render(<App />);
++    await screen.findByRole('heading', { name: 'Ask your documents' });
++    expect(setLocal).not.toHaveBeenCalled();
++    expect(window.localStorage.length).toBe(0);
++    expect(window.sessionStorage.length).toBe(0);
++    expect(document.cookie).not.toContain(TEST_SESSION_TOKEN);
++  });
++
++  it('a new page load starts with an empty workspace', async () => {
++    // Simulates a refresh: no token survives, so the app asks for a new session.
++    const calls = mockApi({ ...quietRoutes, 'GET /api/collections': [], 'GET /api/documents': [] });
++    render(<App />);
++    window.location.hash = 'documents';
++    await waitFor(() => expect(calls.some((c) => c.url.endsWith('/api/session'))).toBe(true));
++  });
++
++  it('reset deletes the server session and clears the UI', async () => {
++    let docs = [makeDocument()];
++    vi.spyOn(window, 'confirm').mockReturnValue(true);
++    const calls = mockApi({
++      ...quietRoutes,
++      'GET /api/collections': () => (docs.length ? [{ name: 'default', document_count: 1, ready_count: 1, chunk_count: 4 }] : []),
++      'GET /api/documents': () => docs,
++      'DELETE /api/session': () => {
++        docs = [];
++        return { message: 'ended' };
++      },
++    });
++    window.location.hash = 'documents';
++    render(<App />);
++    await screen.findByText('handbook.pdf');
++    fireEvent.click(screen.getByRole('button', { name: 'Start a fresh session' }));
++    await screen.findByText(/Started a fresh session/);
++    await waitFor(() => expect(screen.queryByText('handbook.pdf')).not.toBeInTheDocument());
++    const del = calls.find((c) => c.method === 'DELETE' && c.url.endsWith('/api/session'));
++    expect(headerOf(del?.init)).toBe(TEST_SESSION_TOKEN);
++    // A new session was requested after the reset.
++    expect(calls.filter((c) => c.method === 'POST' && c.url.endsWith('/api/session')).length).toBeGreaterThanOrEqual(2);
++  });
++
++  it('an expired session resets the workspace and tells the visitor', async () => {
++    let expired = false;
++    mockApi({
++      ...quietRoutes,
++      'GET /api/collections': [],
++      'GET /api/documents': () => (expired ? new Response('{"detail":"expired"}', { status: 401 }) : [makeDocument()]),
++    });
++    window.location.hash = 'documents';
++    render(<App />);
++    await screen.findByText('handbook.pdf');
++    expired = true;
++    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
++    fireEvent.click(screen.getByTitle('Refresh Metrics'));
++    await screen.findByText(/Your session expired/);
++  });
++
++  it('closes the session with a beacon when the page is hidden', async () => {
++    const beacon = vi.fn().mockReturnValue(true);
++    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true });
++    mockApi({ ...quietRoutes, 'GET /api/collections': [], 'GET /api/documents': [] });
++    render(<App />);
++    await waitFor(() => expect(screen.getByText(/No documents|Upload/i)).toBeTruthy());
++    window.dispatchEvent(new Event('pagehide'));
++    expect(beacon).toHaveBeenCalledWith(expect.stringMatching(/\/api\/session\/close$/), TEST_SESSION_TOKEN);
++  });
++});
+diff --git a/frontend/src/test/setup.ts b/frontend/src/test/setup.ts
+index 86bc5b8..f72a220 100644
+--- a/frontend/src/test/setup.ts
++++ b/frontend/src/test/setup.ts
+@@ -1,6 +1,7 @@
+ import '@testing-library/jest-dom/vitest';
+ import { afterEach, vi } from 'vitest';
+ import { cleanup } from '@testing-library/react';
++import { __clearSessionForTests } from '../api/client';
+ 
+ // Recharts' ResponsiveContainer needs ResizeObserver, which jsdom lacks.
+ class ResizeObserverStub {
+@@ -13,5 +14,6 @@ class ResizeObserverStub {
+ afterEach(() => {
+   cleanup();
+   vi.restoreAllMocks();
++  __clearSessionForTests();
+   window.location.hash = '';
+ });
+diff --git a/frontend/src/test/workflow.test.tsx b/frontend/src/test/workflow.test.tsx
+index 0b441f2..feab8cc 100644
+--- a/frontend/src/test/workflow.test.tsx
++++ b/frontend/src/test/workflow.test.tsx
+@@ -86,7 +86,7 @@ describe('upload-to-query workflow', () => {
+     const file = new File(['x'], 'notes.docx');
+     fireEvent.change(await screen.findByTestId('file-input'), { target: { files: [file] } });
+     expect(await screen.findByRole('alert')).toHaveTextContent('only .pdf and .txt files are supported');
+-    expect(calls.some((c) => c.method === 'POST')).toBe(false);
++    expect(calls.some((c) => c.method === 'POST' && c.url.includes('/api/documents'))).toBe(false);
+   });
+ 
+   it('shows the API error message when a question fails', async () => {
+diff --git a/render.yaml b/render.yaml
+index b94047f..a1baed1 100644
+--- a/render.yaml
++++ b/render.yaml
+@@ -2,10 +2,9 @@
+ # the existing service was created in the Render dashboard. Use it as a
+ # reference for dashboard settings, or create a new Blueprint from it.
+ #
+-# Persistence: Render's filesystem is ephemeral, so without a disk every
+-# restart or deploy wipes uploaded documents, vectors, cache and telemetry.
+-# Persistent disks need a paid instance type; confirm current plans and
+-# prices on render.com before choosing one.
++# Storage: none needed. Each visitor's documents, vectors, cache and
++# telemetry live in that session's in-memory workspace and are meant to
++# disappear on restart, redeploy or free-tier spin-down.
+ services:
+   - type: web
+     name: cost-aware-rag-api
+@@ -15,22 +14,16 @@ services:
+     # With 2 GB or more, use requirements.txt and
+     # RAG_EMBEDDING_PROVIDER=sentence-transformers instead.
+     buildCommand: pip install -r requirements-lite.txt
+-    # One worker: background ingestion and the in-memory vector matrix are
+-    # per process. --proxy-headers makes rate limiting see client IPs.
++    # One worker: sessions, background ingestion and vectors live in one
++    # process's memory. --proxy-headers makes rate limiting see client IPs.
+     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"
+     healthCheckPath: /health
+-    plan: starter
+-    disk:
+-      name: rag-data
+-      mountPath: /var/data
+-      sizeGB: 1
++    plan: free
+     envVars:
+       - key: PYTHON_VERSION
+         value: 3.12.3
+       - key: RAG_ENVIRONMENT
+         value: production
+-      - key: RAG_DATABASE_PATH
+-        value: /var/data/rag.db
+       - key: RAG_EMBEDDING_PROVIDER
+         value: simulated
+       - key: RAG_RETRIEVAL_MIN_RELEVANCE

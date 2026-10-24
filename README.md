@@ -7,11 +7,10 @@ same, and a router that sends simple questions to a cheaper Groq model. Every
 request is recorded with its retrieval, cache, routing, token, cost and
 latency details, and the dashboard shows those records.
 
-> **Status.** The document-grounded RAG pipeline described here lives on the
-> `feature/document-grounded-rag` branch and has **not been deployed** yet.
-> The live demo at https://cost-aware-rag.vercel.app still runs the earlier
-> cache-and-routing version (see [History](#history)). All numbers below come
-> from local runs; nothing here was measured on the hosted service.
+> **Status.** All numbers below come from local runs; nothing here was
+> measured on the hosted service. Every visitor gets a private, temporary
+> workspace (see [Sessions and privacy](#sessions-and-privacy)); nothing a
+> visitor uploads is stored permanently.
 
 ## What problem this solves
 
@@ -75,9 +74,48 @@ and costs the same for a trivial question as for a hard one. This project:
                                                    cache/fresh badge, pipeline timings
 ```
 
-One SQLite file (WAL mode) holds documents, page text, chunk vectors, the
-semantic cache and telemetry. Raw uploads are not kept; re-indexing rebuilds
+Each visitor session has its own in-memory SQLite database holding that
+session's documents, page text, chunk vectors, semantic cache and telemetry.
+Nothing is written to disk. Raw uploads are not kept; re-indexing rebuilds
 chunks from the stored page text.
+
+## Sessions and privacy
+
+Every page load starts a fresh, empty workspace, and no visitor can see
+another visitor's documents, answers or request history.
+
+- **Server-issued tokens.** The frontend calls `POST /api/session` and gets a
+  random 256-bit token. Every document, query, cache and metrics request sends
+  it in the `X-Session-Token` header. The server keeps only a SHA-256 hash of
+  each token and rejects missing, unknown, malformed or expired tokens with
+  401. Clients cannot choose a token, so passing a different ID only works
+  with a stolen token.
+- **Private workspace per session.** Each session owns an in-memory SQLite
+  database and its own document store, vector index, semantic cache and
+  telemetry store. Only stateless parts are shared: the embedding model, the
+  router and the LLM client. Visitor A's document IDs return 404 for visitor
+  B, and a cache hit can only come from the same session's cache.
+- **Memory only in the browser.** The token lives in a JavaScript variable. It
+  is never written to localStorage, sessionStorage or cookies, and no document
+  content is stored in the browser. Reloading or opening a new tab starts a
+  new session.
+- **Cleanup.** A workspace is deleted when the visitor presses *Start a fresh
+  session* (`DELETE /api/session`), when the tab closes or reloads (a
+  best-effort `navigator.sendBeacon` to `/api/session/close`), after
+  `RAG_SESSION_IDLE_TTL_MINUTES` (30) idle, after `RAG_SESSION_MAX_AGE_HOURS`
+  (6) in total, or when the server restarts or redeploys.
+- **Bounded memory.** At most `RAG_SESSION_MAX_ACTIVE` (50) sessions are kept;
+  creating one more evicts the least recently used. Each session may hold
+  `RAG_SESSION_MAX_DOCUMENTS` (10) documents and `RAG_SESSION_MAX_UPLOAD_MB`
+  (25) MB of uploads, and new sessions are rate-limited
+  (`RAG_SESSION_RATE_LIMIT`, 20/minute per client).
+- **Observability is per session.** The dashboard's metrics, costs and
+  request history cover only your own session. `/health` reports only the
+  number of active sessions.
+
+Because sessions live in one process's memory, the backend must run as a
+**single worker**. With several workers, a request could reach a worker that
+does not know the session.
 
 ## How it works
 
@@ -202,16 +240,22 @@ of the question.
   as paths.
 - Rate limits: `RAG_QUERY_RATE_LIMIT` (30/minute) on both query endpoints and
   `RAG_UPLOAD_RATE_LIMIT` (10/minute) on upload and re-index.
-- In production, `POST /api/metrics/reset` requires the `X-Admin-Token`
-  header to match `RAG_ADMIN_TOKEN`, and it is disabled when no token is set.
+- Every document, query and metrics endpoint is scoped to the caller's
+  session; see [Sessions and privacy](#sessions-and-privacy).
+- In production, `POST /api/metrics/reset` (which clears only the caller's
+  session telemetry and cache) also requires the `X-Admin-Token` header to
+  match `RAG_ADMIN_TOKEN`, and it is disabled when no token is set. Visitors
+  clear their own workspace with `DELETE /api/session`.
 - CORS allows only `RAG_CORS_ORIGINS`, without credentials. Responses send
   `X-Content-Type-Options: nosniff` and a strict `Referrer-Policy`. Request
   IDs from clients are sanitized.
 - Prompt injection: see [Retrieval and grounding](#retrieval-and-grounding).
   The defences reduce the risk but cannot rule it out with any LLM.
-- **There is no user authentication.** Collections separate documents, but
-  anyone who can reach the API can read or delete any collection. Do not
-  upload confidential documents to a public deployment.
+- **There are no user accounts.** Isolation is per browser session, not per
+  person, and the session token is a bearer secret: anyone who obtains it can
+  use that session until it ends. Uploaded text is processed in the server's
+  memory and sent to Groq when you ask a question, so avoid confidential
+  documents on a public deployment.
 
 ## Evaluation
 
@@ -311,7 +355,9 @@ Testing Library.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/health` | GET | Status, embedding provider, LLM key configured (yes/no), document counts |
+| `/health` | GET | Status, embedding provider, LLM key configured (yes/no), active session count |
+| `/api/session` | POST / GET / DELETE | Start a private workspace (returns the token) / its expiry / delete it and all its data |
+| `/api/session/close` | POST | Same as DELETE, for `navigator.sendBeacon` (token as plain-text body) |
 | `/api/config` | GET | Non-secret settings the UI needs |
 | `/api/rag/query` | POST | Grounded answer over a collection (optional `document_ids`, `top_k`, `min_relevance`, `force_refresh`) |
 | `/api/query` | POST | General-knowledge mode, **not grounded** (the original endpoint) |
@@ -321,9 +367,10 @@ Testing Library.
 | `/api/documents/{id}/reindex` | POST | Rebuild chunks and embeddings |
 | `/api/metrics/summary` | GET | Aggregates (`?mode=rag|general`) |
 | `/api/metrics/requests` | GET | Recent request records |
-| `/api/metrics/reset` | POST | Clear telemetry and cache (admin token in production) |
+| `/api/metrics/reset` | POST | Clear this session's telemetry and cache (admin token in production) |
 
-Interactive docs at `/docs` when the backend is running.
+Every endpoint except `/health`, `/api/config` and `POST /api/session` needs
+the `X-Session-Token` header. Interactive docs at `/docs` when the backend is running.
 
 ## Local setup
 
@@ -360,7 +407,10 @@ lists every one with its default. The ones you will most likely change:
 | `RAG_RETRIEVAL_MIN_RELEVANCE` | `0.30` | About `0.15` with `simulated` |
 | `RAG_SIMILARITY_THRESHOLD` | `0.82` | Cache reuse threshold |
 | `RAG_ROUTING_POLICY` | `complexity` | or `fixed-lightweight`, `fixed-complex` |
-| `RAG_DATABASE_PATH` | `backend/metrics.db` | Point at a persistent disk in production |
+| `RAG_SESSION_IDLE_TTL_MINUTES` / `RAG_SESSION_MAX_AGE_HOURS` | `30` / `6` | When a workspace is deleted |
+| `RAG_SESSION_MAX_ACTIVE` | `50` | Sessions kept in memory; the least recently used is evicted beyond this |
+| `RAG_SESSION_MAX_DOCUMENTS` / `RAG_SESSION_MAX_UPLOAD_MB` | `10` / `25` | Per-session upload limits |
+| `RAG_DATABASE_PATH` | `backend/metrics.db` | Only used by the offline evaluation; the web app writes nothing to disk |
 | `RAG_CORS_ORIGINS` | localhost:5173 | JSON list |
 | `RAG_ENVIRONMENT` / `RAG_ADMIN_TOKEN` | `development` / empty | Production locks the reset endpoint |
 | `VITE_API_BASE_URL` (frontend) | empty | Public backend URL; build-time; never a secret |
@@ -368,8 +418,8 @@ lists every one with its default. The ones you will most likely change:
 ## Tests
 
 ```bash
-cd backend && python -m pytest -q      # 134 passed, 18 skipped (last local run)
-cd frontend && npm test && npm run build   # 11 passed; build succeeds
+cd backend && python -m pytest -q      # 153 passed, 18 skipped (last local run)
+cd frontend && npm test && npm run build   # 17 passed; build succeeds
 ```
 
 All LLM calls are mocked, so the tests need no key, network or money. The
@@ -382,16 +432,18 @@ fallback, telemetry, rate limits, prompt injection, and secret handling. The
 frontend tests cover the documents page, the chat with citations, the
 cache badge, and loading, empty and error states.
 
+`tests/test_sessions.py` and `src/test/session.test.tsx` cover session
+isolation: visitor B sees an empty workspace and gets 404 for visitor A's
+documents; forged or missing tokens get 401; reset, tab-close beacons, expiry
+and restarts delete data; nothing is written to disk; cache hits never cross
+sessions; and the token never reaches browser storage.
+
 ## Deployment
 
 **Backend (Render).** `render.yaml` is a reference Blueprint; it is not
-applied to the existing service automatically. Decide on storage first:
-
-- **Persistent:** a paid instance with a disk mounted at `/var/data` and
-  `RAG_DATABASE_PATH=/var/data/rag.db`. Documents, cache and telemetry
-  survive restarts.
-- **Ephemeral (free tier):** works, but every deploy or restart deletes all
-  uploaded documents and telemetry. Fine for a demo; say so in the UI or docs.
+applied to the existing service automatically. No disk or database is
+needed: workspaces live in memory, and a restart, redeploy or free-tier
+spin-down simply ends every session, which is the intended behaviour.
 
 On about 512 MB of RAM use `requirements-lite.txt` with
 `RAG_EMBEDDING_PROVIDER=simulated` and `RAG_RETRIEVAL_MIN_RELEVANCE=0.15`;
@@ -412,13 +464,15 @@ Production and redeploy, because Vite embeds it at build time.
 | Every question gets "insufficient evidence" | `RAG_RETRIEVAL_MIN_RELEVANCE` too high for the embedder (use ~0.15 with `simulated`) or document still processing |
 | Document stuck in `failed` after a restart | Ingestion was interrupted; press Re-index |
 | PDF fails with "No extractable text was found" | Scanned PDF with no text layer (no OCR) |
-| Documents vanish after deploy | Ephemeral filesystem; add a disk |
+| Documents vanish, or "Your session expired" appears | Expected: the session was reset, idle for 30 minutes, evicted, or the server restarted |
+| Every request returns 401 | The backend runs more than one worker, or the frontend is pointed at a different backend than the one that issued the session |
 | Browser shows CORS errors | Frontend origin missing from `RAG_CORS_ORIGINS` |
 | Process killed on startup | MiniLM + PyTorch exceeded memory; use the lite setup |
 
 ## Known limitations
 
-- No authentication or per-user isolation.
+- No user accounts: isolation is per browser session, and sessions are lost
+  on every restart by design.
 - Exact vector search loads a collection's vectors into memory; fine for
   thousands of chunks, not millions.
 - Single process: background ingestion is not a durable job queue.

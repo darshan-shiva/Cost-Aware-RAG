@@ -1,7 +1,8 @@
 import hmac
-import sqlite3
+import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Union
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -12,6 +13,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
 )
 from ..config import settings
@@ -25,34 +27,119 @@ from ..schemas import (
     RAGQueryRequest,
     RAGQueryResponse,
     RequestRecord,
+    SessionOut,
     UploadResponse,
 )
-from ..services.query_service import QueryService
+from ..cache import SemanticCache
+from ..cache.embeddings import BaseEmbeddingProvider
+from ..llm import LLMGateway
+from ..memdb import InMemoryDatabase, WorkspaceClosed
+from ..metrics import SQLiteMetricsStore
+from ..routing import CostAwareRouter
+from ..services.query_service import (
+    QueryService,
+    build_embedding_provider,
+    build_llm_gateway,
+)
+from ..sessions import SessionManager, Workspace
 from ..documents import (
     DocumentRecord,
     DocumentStore,
     DocumentValidationError,
     IngestionService,
     VectorIndex,
+    sanitize_filename,
 )
 from ..rag import RAGService
 from ..rate_limit import limiter
 
+logger = logging.getLogger("cost_aware_rag.api")
 router = APIRouter()
 
-# Singleton or dependency-injected query service
-_service_instance: QueryService | None = None
-_rag_instance: RAGService | None = None
+SESSION_HEADER = "X-Session-Token"
 
 
-def get_query_service() -> QueryService:
-    global _service_instance
-    if _service_instance is None:
-        _service_instance = QueryService()
-    return _service_instance
+@dataclass
+class SharedComponents:
+    """Stateless pieces every session uses: they hold no visitor data."""
+
+    embedding_provider: BaseEmbeddingProvider
+    router: CostAwareRouter
+    gateway: LLMGateway
 
 
-def build_rag_service(query_service: QueryService, db_path: str) -> RAGService:
+_shared: Optional[SharedComponents] = None
+_session_manager: Optional[SessionManager] = None
+
+
+def get_shared() -> SharedComponents:
+    global _shared
+    if _shared is None:
+        gateway = build_llm_gateway()
+        if not gateway.is_configured:
+            logger.warning("llm_not_configured")
+        _shared = SharedComponents(
+            embedding_provider=build_embedding_provider(),
+            router=CostAwareRouter(),
+            gateway=gateway,
+        )
+    return _shared
+
+
+def build_workspace_services(shared: SharedComponents, db: InMemoryDatabase):
+    """A session's private cache, telemetry, document store and RAG service."""
+    cache = SemanticCache(
+        embedding_provider=shared.embedding_provider,
+        default_threshold=settings.SIMILARITY_THRESHOLD,
+        max_entries=settings.CACHE_MAX_ENTRIES,
+        db_path=db,
+    )
+    query_service = QueryService(
+        cache=cache,
+        router=shared.router,
+        metrics_store=SQLiteMetricsStore(db),
+        gateway=shared.gateway,
+    )
+    return query_service, build_rag_service(query_service, db)
+
+
+def get_session_manager() -> SessionManager:
+    global _session_manager
+    if _session_manager is None:
+        _session_manager = SessionManager(
+            factory=lambda db: build_workspace_services(get_shared(), db),
+            idle_ttl_seconds=settings.SESSION_IDLE_TTL_MINUTES * 60,
+            max_age_seconds=settings.SESSION_MAX_AGE_HOURS * 3600,
+            max_active=settings.SESSION_MAX_ACTIVE,
+        )
+    return _session_manager
+
+
+def get_workspace(
+    x_session_token: Optional[str] = Header(default=None, alias=SESSION_HEADER),
+    manager: SessionManager = Depends(get_session_manager),
+) -> Workspace:
+    """Resolve the caller's private workspace from its session token."""
+    workspace = manager.get(x_session_token)
+    if workspace is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Your session is missing or has expired. Reload the page to start a new one.",
+        )
+    return workspace
+
+
+def get_query_service(workspace: Workspace = Depends(get_workspace)) -> QueryService:
+    return workspace.query_service
+
+
+def get_rag_service(workspace: Workspace = Depends(get_workspace)) -> RAGService:
+    return workspace.rag
+
+
+def build_rag_service(
+    query_service: QueryService, db_path: Union[str, InMemoryDatabase]
+) -> RAGService:
     """Wire the document store, vector index and ingestion around the shared
     embedding provider, cache, router, gateway and telemetry store."""
     store = DocumentStore(db_path)
@@ -73,11 +160,12 @@ def build_rag_service(query_service: QueryService, db_path: str) -> RAGService:
     return RAGService(query_service, store, index, ingestion)
 
 
-def get_rag_service() -> RAGService:
-    global _rag_instance
-    if _rag_instance is None:
-        _rag_instance = build_rag_service(get_query_service(), settings.DATABASE_PATH)
-    return _rag_instance
+def _process_upload(ingestion: IngestionService, document_id: str, version: int, data) -> None:
+    try:
+        ingestion.process(document_id, version, data)
+    except WorkspaceClosed:
+        # The visitor reset or abandoned the session mid-processing.
+        logger.info("ingestion_skipped_session_closed")
 
 
 def _iso(ts: float) -> str:
@@ -118,38 +206,33 @@ def require_admin(x_admin_token: Optional[str] = Header(default=None)) -> None:
 
 @router.get("/health", response_model=HealthResponse, tags=["System"])
 def health_check(
-    service: QueryService = Depends(get_query_service),
-    rag: RAGService = Depends(get_rag_service),
+    shared: SharedComponents = Depends(get_shared),
+    manager: SessionManager = Depends(get_session_manager),
 ):
-    """Application health and status check."""
-    database_ok = True
-    document_count: Optional[int] = None
-    try:
-        document_count = sum(c["document_count"] for c in rag.store.list_collections())
-    except sqlite3.Error:
-        database_ok = False
-    provider = service.cache.embedding_provider
+    """Application health and status check. Reports no visitor data."""
+    provider = shared.embedding_provider
     return HealthResponse(
-        status="healthy" if database_ok else "degraded",
+        status="healthy",
         version=settings.VERSION,
         simulated_mode=provider.is_simulated,
         timestamp=datetime.now(timezone.utc).isoformat(),
         embedding_provider=provider.provider_name,
-        llm_configured=service.gateway.is_configured,
-        database_ok=database_ok,
-        document_count=document_count,
+        llm_configured=shared.gateway.is_configured,
+        database_ok=True,
+        document_count=None,
+        active_sessions=manager.active_count,
         environment=settings.ENVIRONMENT,
     )
 
 
 @router.get("/api/config", tags=["System"])
-def public_config(service: QueryService = Depends(get_query_service)):
+def public_config(shared: SharedComponents = Depends(get_shared)):
     """Non-secret runtime configuration the dashboard uses for labels and defaults."""
-    r = service.router
+    r = shared.router
     return {
-        "embedding_provider": service.cache.embedding_provider.provider_name,
-        "embedding_simulated": service.cache.embedding_provider.is_simulated,
-        "llm_configured": service.gateway.is_configured,
+        "embedding_provider": shared.embedding_provider.provider_name,
+        "embedding_simulated": shared.embedding_provider.is_simulated,
+        "llm_configured": shared.gateway.is_configured,
         "routing_policy": r.policy,
         "models": [
             {
@@ -162,7 +245,7 @@ def public_config(service: QueryService = Depends(get_query_service)):
             for m in r.profiles
         ],
         "pricing_is_estimate": True,
-        "cache_similarity_threshold": service.cache.default_threshold,
+        "cache_similarity_threshold": settings.SIMILARITY_THRESHOLD,
         "retrieval_top_k": settings.RETRIEVAL_TOP_K,
         "retrieval_max_top_k": settings.RETRIEVAL_MAX_TOP_K,
         "retrieval_min_relevance": settings.RETRIEVAL_MIN_RELEVANCE,
@@ -172,7 +255,63 @@ def public_config(service: QueryService = Depends(get_query_service)):
         "chunk_size_chars": settings.CHUNK_SIZE_CHARS,
         "chunk_overlap_chars": settings.CHUNK_OVERLAP_CHARS,
         "telemetry_stores_query_text": settings.TELEMETRY_STORE_QUERY_TEXT,
+        "session_idle_ttl_minutes": settings.SESSION_IDLE_TTL_MINUTES,
+        "session_max_documents": settings.SESSION_MAX_DOCUMENTS,
+        "session_max_upload_mb": settings.SESSION_MAX_UPLOAD_MB,
     }
+
+
+# ------------------------------------------------------------------ sessions
+
+
+def _session_out(manager: SessionManager, workspace: Workspace, token: Optional[str] = None) -> SessionOut:
+    return SessionOut(
+        session_token=token,
+        expires_in_seconds=round(manager.expires_in(workspace)),
+        idle_ttl_seconds=round(manager.idle_ttl_seconds),
+        max_documents=settings.SESSION_MAX_DOCUMENTS,
+        max_upload_mb=settings.SESSION_MAX_UPLOAD_MB,
+    )
+
+
+@router.post("/api/session", response_model=SessionOut, status_code=201, tags=["Session"])
+@limiter.limit(settings.SESSION_RATE_LIMIT)
+def create_session(request: Request, manager: SessionManager = Depends(get_session_manager)):
+    """Start a private, empty workspace. Send the returned token in the
+    X-Session-Token header; it is the only key to this workspace."""
+    token, workspace = manager.create()
+    return _session_out(manager, workspace, token)
+
+
+@router.get("/api/session", response_model=SessionOut, tags=["Session"])
+def get_session_info(
+    workspace: Workspace = Depends(get_workspace),
+    manager: SessionManager = Depends(get_session_manager),
+):
+    return _session_out(manager, workspace)
+
+
+@router.delete("/api/session", tags=["Session"])
+def end_session(
+    x_session_token: Optional[str] = Header(default=None, alias=SESSION_HEADER),
+    manager: SessionManager = Depends(get_session_manager),
+):
+    """Delete this session's documents, chunks, embeddings, cached answers
+    and telemetry. Only the session's own token can do this."""
+    if not manager.close(x_session_token):
+        raise HTTPException(status_code=401, detail="Session not found or already ended.")
+    return {"message": "Session ended; its documents, answers and telemetry were deleted."}
+
+
+@router.post("/api/session/close", status_code=204, tags=["Session"])
+async def end_session_beacon(request: Request, manager: SessionManager = Depends(get_session_manager)):
+    """Same as DELETE /api/session, for navigator.sendBeacon when the tab
+    closes: the token is the plain-text body, because beacons cannot set
+    headers. Always returns 204 so it reveals nothing about the token."""
+    body = await request.body()
+    if len(body) <= 128:
+        manager.close(body.decode("ascii", errors="ignore").strip())
+    return Response(status_code=204)
 
 
 @router.post("/api/query", response_model=QueryResponse, tags=["Query"])
@@ -244,8 +383,9 @@ async def upload_document(
     collection: str = Form(default="default"),
     rag: RAGService = Depends(get_rag_service),
 ):
-    """Upload a PDF or TXT file. Processing (extraction, chunking, embedding)
-    runs in the background; poll GET /api/documents/{id} for its status."""
+    """Upload a PDF or TXT file into this session's workspace. Processing
+    (extraction, chunking, embedding) runs in the background; poll
+    GET /api/documents/{id} for its status."""
     limit = rag.ingestion.max_upload_bytes
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > limit + 64 * 1024:
@@ -254,6 +394,7 @@ async def upload_document(
     await file.close()
     if len(data) > limit:
         raise HTTPException(status_code=413, detail=f"The file exceeds the {settings.MAX_UPLOAD_MB:g} MB upload limit.")
+    _check_session_quota(rag, collection, file.filename, len(data))
     try:
         outcome = rag.ingestion.register_upload(collection, file.filename, data)
     except DocumentValidationError as exc:
@@ -263,7 +404,7 @@ async def upload_document(
     if outcome.outcome == "duplicate":
         message = f"Identical content is already indexed as '{doc.filename}'; nothing was re-processed."
     else:
-        background.add_task(rag.ingestion.process, doc.document_id, doc.version, data)
+        background.add_task(_process_upload, rag.ingestion, doc.document_id, doc.version, data)
         message = (
             f"Replacing '{doc.filename}' with version {doc.version}; cached answers for this collection were invalidated."
             if outcome.outcome == "replaced"
@@ -274,6 +415,28 @@ async def upload_document(
         outcome=outcome.outcome,
         message=message,
     )
+
+
+def _check_session_quota(rag: RAGService, collection: str, filename: Optional[str], size: int) -> None:
+    """Bound the memory one session can use. A same-name upload replaces
+    the earlier file, so it does not count twice."""
+    existing = rag.store.list(None)
+    try:
+        name = sanitize_filename(filename)
+    except DocumentValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    kept = [d for d in existing if not (d.collection == collection and d.filename == name)]
+    if len(kept) >= settings.SESSION_MAX_DOCUMENTS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This session already has {settings.SESSION_MAX_DOCUMENTS} documents. Delete one first.",
+        )
+    total = sum(d.size_bytes for d in kept) + size
+    if total > settings.SESSION_MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"This session's uploads would exceed {settings.SESSION_MAX_UPLOAD_MB:g} MB in total. Delete a document first.",
+        )
 
 
 @router.post("/api/documents/{document_id}/reindex", response_model=DocumentOut, status_code=202, tags=["Documents"])
@@ -291,7 +454,7 @@ def reindex_document(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found.")
-    background.add_task(rag.ingestion.process, doc.document_id, doc.version, None)
+    background.add_task(_process_upload, rag.ingestion, doc.document_id, doc.version, None)
     return _document_out(doc, rag.ingestion.embedding_model)
 
 
@@ -333,9 +496,10 @@ def get_recent_requests(
 def reset_metrics_and_cache(
     service: QueryService = Depends(get_query_service),
 ):
-    """Clear telemetry and the semantic cache (documents are kept).
+    """Clear this session's telemetry and semantic cache (documents are kept).
 
-    Open in development; requires X-Admin-Token in production."""
+    Open in development; requires X-Admin-Token in production. Visitors use
+    DELETE /api/session to clear their own workspace."""
     service.cache.clear()
     service.metrics_store.clear()
     return {"message": "Cache and metrics reset successfully."}

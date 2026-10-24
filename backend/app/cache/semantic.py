@@ -5,7 +5,8 @@ import json
 import sqlite3
 import logging
 from contextlib import contextmanager
-from typing import Optional, Dict, Any, List, Generator, Callable
+from typing import Optional, Dict, Any, List, Generator, Callable, Union
+from ..memdb import InMemoryDatabase
 from .base import BaseCache, CacheEntry, CacheLookupResult
 from .embeddings import BaseEmbeddingProvider, SimulatedEmbeddingProvider
 from .guards import normalize_query, salient_terms_conflict
@@ -57,7 +58,7 @@ class SemanticCache(BaseCache):
         embedding_provider: Optional[BaseEmbeddingProvider] = None,
         default_threshold: float = 0.82,
         max_entries: int = 1000,
-        db_path: Optional[str] = None,
+        db_path: Optional[Union[str, InMemoryDatabase]] = None,
     ):
         self.embedding_provider = embedding_provider or SimulatedEmbeddingProvider()
         self.default_threshold = default_threshold
@@ -73,6 +74,10 @@ class SemanticCache(BaseCache):
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
         if not self.db_path:
             raise RuntimeError("Database path not configured for persistent cache.")
+        if isinstance(self.db_path, InMemoryDatabase):
+            with self.db_path.connection() as conn:
+                yield conn
+            return
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:

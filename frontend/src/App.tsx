@@ -17,7 +17,9 @@ import {
   fetchMetricsSummary,
   fetchRecentRequests,
   submitQuery,
-  resetMetrics,
+  resetSession,
+  onSessionReset,
+  endSessionOnPageHide,
 } from './api/client';
 import {
   CollectionInfo,
@@ -50,6 +52,30 @@ export function App() {
   const [docsLoading, setDocsLoading] = useState(false);
   const [docsError, setDocsError] = useState<string | null>(null);
   const [collection, setCollection] = useState('default');
+  // Bumped whenever the server-side workspace is replaced, to clear every
+  // component's local state (chat turns, upload notices, filters).
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+
+  useEffect(() => endSessionOnPageHide(), []);
+
+  useEffect(
+    () =>
+      onSessionReset((reason) => {
+        setDocuments([]);
+        setCollections([]);
+        setMetrics(null);
+        setRequests([]);
+        setCollection('default');
+        setSessionEpoch((e) => e + 1);
+        setSessionNotice(
+          reason === 'expired'
+            ? 'Your session expired, so its documents and answers were deleted. You are now in a new, empty workspace.'
+            : 'Started a fresh session. Your previous documents, answers and telemetry were deleted from the server.'
+        );
+      }),
+    []
+  );
 
   useEffect(() => {
     const onHash = () => setTab(tabFromHash());
@@ -98,12 +124,15 @@ export function App() {
     // Poll metrics every 15 seconds for real-time observability
     const interval = setInterval(loadData, 15000);
     return () => clearInterval(interval);
-  }, [loadData]);
+  }, [loadData, sessionEpoch]);
 
   useEffect(() => {
     loadDocuments();
+  }, [loadDocuments, sessionEpoch]);
+
+  useEffect(() => {
     fetchConfig().then(setConfig).catch(() => setConfig(null));
-  }, [loadDocuments]);
+  }, []);
 
   // Poll while any document is still being processed.
   const anyProcessing = documents.some((d) => d.status === 'pending' || d.status === 'processing');
@@ -141,13 +170,12 @@ export function App() {
   };
 
   const handleReset = async () => {
-    if (window.confirm('Reset all telemetry and flush the semantic cache? Documents are kept.')) {
-      try {
-        await resetMetrics();
-        await loadData();
-      } catch (err) {
-        alert(err instanceof Error ? err.message : 'Failed to reset metrics.');
-      }
+    if (
+      window.confirm(
+        'Start a fresh session? This deletes your uploaded documents, answers, cached answers and telemetry from the server.'
+      )
+    ) {
+      await resetSession();
     }
   };
 
@@ -167,7 +195,16 @@ export function App() {
         onTabChange={changeTab}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      <main key={sessionEpoch} className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        {sessionNotice && (
+          <div role="status" className="flex items-start justify-between gap-3 rounded-lg border border-sky-900/60 bg-sky-950/30 px-4 py-3 text-sm text-sky-200">
+            <span>{sessionNotice}</span>
+            <button type="button" onClick={() => setSessionNotice(null)} className="text-xs text-sky-300 hover:text-sky-100">
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {tab === 'ask' && (
           <AskPanel
             collection={collection}

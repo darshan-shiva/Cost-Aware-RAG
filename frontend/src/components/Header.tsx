@@ -71,7 +71,8 @@ export const Header: React.FC<HeaderProps> = ({ health, isLoading, onRefresh, on
             </button>
             <button
               onClick={onReset}
-              title="Reset cache & telemetry (documents are kept)"
+              title="Start a fresh session (deletes your documents, answers and telemetry)"
+              aria-label="Start a fresh session"
               className="p-2 text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-900/30 border border-rose-900/40 rounded-lg transition-colors"
             >
               <Trash2 className="w-4 h-4" />

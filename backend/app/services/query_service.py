@@ -34,6 +34,26 @@ def build_groq_client() -> Optional[Groq]:
     )
 
 
+def build_embedding_provider():
+    if settings.SIMULATED_CACHE:
+        from ..cache.embeddings import SimulatedEmbeddingProvider
+        return SimulatedEmbeddingProvider(settings.SIMULATED_EMBEDDING_DIM)
+    return get_embedding_provider(
+        provider_type=settings.EMBEDDING_PROVIDER,
+        model_name=settings.EMBEDDING_MODEL_NAME,
+        dimension=settings.SIMULATED_EMBEDDING_DIM,
+    )
+
+
+def build_llm_gateway() -> LLMGateway:
+    return LLMGateway(
+        client=build_groq_client(),
+        max_completion_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
+        fallback_enabled=settings.LLM_FALLBACK_ENABLED,
+        availability_ttl_seconds=settings.MODEL_AVAILABILITY_TTL_SECONDS,
+    )
+
+
 def provider_error_response(exc: GenerationFailed) -> HTTPException:
     """Map a generation failure to a safe HTTP error (no provider details)."""
     if exc.category == NOT_CONFIGURED:
@@ -60,16 +80,7 @@ class QueryService:
         gateway: Optional[LLMGateway] = None,
     ):
         if cache is None:
-            if settings.SIMULATED_CACHE:
-                from ..cache.embeddings import SimulatedEmbeddingProvider
-                provider = SimulatedEmbeddingProvider(settings.SIMULATED_EMBEDDING_DIM)
-            else:
-                provider = get_embedding_provider(
-                    provider_type=settings.EMBEDDING_PROVIDER,
-                    model_name=settings.EMBEDDING_MODEL_NAME,
-                    dimension=settings.SIMULATED_EMBEDDING_DIM,
-                )
-
+            provider = build_embedding_provider()
             cache = SemanticCache(
                 embedding_provider=provider,
                 default_threshold=settings.SIMILARITY_THRESHOLD,
@@ -84,17 +95,9 @@ class QueryService:
         )
         # A missing API key no longer stops the app from starting: document
         # management and telemetry still work, and generation returns 503.
-        self.gateway = gateway or LLMGateway(
-            client=build_groq_client(),
-            max_completion_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
-            fallback_enabled=settings.LLM_FALLBACK_ENABLED,
-            availability_ttl_seconds=settings.MODEL_AVAILABILITY_TTL_SECONDS,
-        )
-        if not self.gateway.is_configured:
-            logger.warning("llm_not_configured")
-
+        self.gateway = gateway or build_llm_gateway()
         provider = self.cache.embedding_provider
-        logger.info(
+        logger.debug(
             f"Embedding provider: {provider.provider_name} | "
             f"Simulated: {provider.is_simulated} | "
             f"Dimension: {provider.dimension}"

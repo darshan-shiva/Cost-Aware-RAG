@@ -2,10 +2,9 @@
 # the existing service was created in the Render dashboard. Use it as a
 # reference for dashboard settings, or create a new Blueprint from it.
 #
-# Persistence: Render's filesystem is ephemeral, so without a disk every
-# restart or deploy wipes uploaded documents, vectors, cache and telemetry.
-# Persistent disks need a paid instance type; confirm current plans and
-# prices on render.com before choosing one.
+# Storage: none needed. Each visitor's documents, vectors, cache and
+# telemetry live in that session's in-memory workspace and are meant to
+# disappear on restart, redeploy or free-tier spin-down.
 services:
   - type: web
     name: cost-aware-rag-api
@@ -15,22 +14,16 @@ services:
     # With 2 GB or more, use requirements.txt and
     # RAG_EMBEDDING_PROVIDER=sentence-transformers instead.
     buildCommand: pip install -r requirements-lite.txt
-    # One worker: background ingestion and the in-memory vector matrix are
-    # per process. --proxy-headers makes rate limiting see client IPs.
+    # One worker: sessions, background ingestion and vectors live in one
+    # process's memory. --proxy-headers makes rate limiting see client IPs.
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"
     healthCheckPath: /health
-    plan: starter
-    disk:
-      name: rag-data
-      mountPath: /var/data
-      sizeGB: 1
+    plan: free
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
       - key: RAG_ENVIRONMENT
         value: production
-      - key: RAG_DATABASE_PATH
-        value: /var/data/rag.db
       - key: RAG_EMBEDDING_PROVIDER
         value: simulated
       - key: RAG_RETRIEVAL_MIN_RELEVANCE

@@ -1,7 +1,8 @@
 import sqlite3
 import math
 from contextlib import contextmanager
-from typing import List, Dict, Any, Optional, Generator
+from typing import List, Dict, Any, Optional, Generator, Union
+from ..memdb import InMemoryDatabase
 from ..schemas import RequestRecord, MetricsSummary, ModelStats
 
 # Columns added after the original schema, with their SQLite types. Existing
@@ -48,12 +49,16 @@ class SQLiteMetricsStore:
     and routing metrics.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: Union[str, InMemoryDatabase]):
         self.db_path = db_path
         self._init_db()
 
     @contextmanager
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
+        if isinstance(self.db_path, InMemoryDatabase):
+            with self.db_path.connection() as conn:
+                yield conn
+            return
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         try:

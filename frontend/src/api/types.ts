@@ -70,7 +70,16 @@ export interface HealthDetails extends HealthResponse {
   llm_configured?: boolean | null;
   database_ok?: boolean | null;
   document_count?: number | null;
+  active_sessions?: number | null;
   environment?: string | null;
+}
+
+export interface SessionInfo {
+  session_token: string | null;
+  expires_in_seconds: number;
+  idle_ttl_seconds: number;
+  max_documents: number;
+  max_upload_mb: number;
 }
 
 export interface ModelStats {
@@ -142,6 +151,9 @@ export interface PublicConfig {
   chunk_size_chars: number;
   chunk_overlap_chars: number;
   telemetry_stores_query_text: boolean;
+  session_idle_ttl_minutes?: number;
+  session_max_documents?: number;
+  session_max_upload_mb?: number;
 }
 
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
