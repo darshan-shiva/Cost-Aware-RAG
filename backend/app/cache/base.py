@@ -19,6 +19,11 @@ class CacheLookupResult(BaseModel):
     matched_entry: Optional[CacheEntry] = None
     is_simulated: bool = True
     lookup_latency_ms: float = 0.0
+    # "exact" (normalized text match) or "semantic" on a hit.
+    match_type: Optional[str] = None
+    # Why the best semantic candidate was not reused, if it was rejected.
+    rejection_reason: Optional[str] = None
+    candidates_checked: int = 0
 
 class BaseCache(ABC):
     @abstractmethod

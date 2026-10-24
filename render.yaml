@@ -1,0 +1,45 @@
+# Optional Render Blueprint for the backend. It is NOT applied automatically:
+# the existing service was created in the Render dashboard. Use it as a
+# reference for dashboard settings, or create a new Blueprint from it.
+#
+# Persistence: Render's filesystem is ephemeral, so without a disk every
+# restart or deploy wipes uploaded documents, vectors, cache and telemetry.
+# Persistent disks need a paid instance type; confirm current plans and
+# prices on render.com before choosing one.
+services:
+  - type: web
+    name: cost-aware-rag-api
+    runtime: python
+    rootDir: backend
+    # Lite requirements avoid PyTorch so the service fits ~512 MB of RAM.
+    # With 2 GB or more, use requirements.txt and
+    # RAG_EMBEDDING_PROVIDER=sentence-transformers instead.
+    buildCommand: pip install -r requirements-lite.txt
+    # One worker: background ingestion and the in-memory vector matrix are
+    # per process. --proxy-headers makes rate limiting see client IPs.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /health
+    plan: starter
+    disk:
+      name: rag-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: RAG_ENVIRONMENT
+        value: production
+      - key: RAG_DATABASE_PATH
+        value: /var/data/rag.db
+      - key: RAG_EMBEDDING_PROVIDER
+        value: simulated
+      - key: RAG_RETRIEVAL_MIN_RELEVANCE
+        value: "0.15"
+      - key: RAG_SIMILARITY_THRESHOLD
+        value: "0.80"
+      - key: RAG_CORS_ORIGINS
+        value: '["https://cost-aware-rag.vercel.app"]'
+      - key: RAG_GROQ_API_KEY
+        sync: false
+      - key: RAG_ADMIN_TOKEN
+        sync: false
