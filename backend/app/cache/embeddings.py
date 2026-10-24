@@ -156,7 +156,7 @@ class SimulatedEmbeddingProvider(BaseEmbeddingProvider):
 
     @property
     def provider_name(self) -> str:
-        return "Simulated-Hashing-Embedder (64-dim)"
+        return f"Simulated-Hashing-Embedder ({self._dimension}-dim)"
 
     @property
     def dimension(self) -> int:
@@ -205,6 +205,7 @@ class SimulatedEmbeddingProvider(BaseEmbeddingProvider):
 def get_embedding_provider(
     provider_type: str = "sentence-transformers",
     model_name: str = "all-MiniLM-L6-v2",
+    dimension: int = 64,
 ) -> BaseEmbeddingProvider:
     """Factory helper to obtain the configured embedding provider."""
     if provider_type == "sentence-transformers":
@@ -212,7 +213,7 @@ def get_embedding_provider(
             model_name=model_name
         )
     elif provider_type == "simulated":
-        return SimulatedEmbeddingProvider()
+        return SimulatedEmbeddingProvider(dimension=dimension)
     else:
         raise ValueError(
             f"Unknown embedding provider type: {provider_type}"

@@ -4,35 +4,51 @@ from app.main import app
 from app.api.routes import get_query_service
 from app.services.query_service import QueryService
 from app.cache.semantic import SemanticCache
-from app.cache.embeddings import SentenceTransformersEmbeddingProvider
+from app.cache.embeddings import (
+    SentenceTransformersEmbeddingProvider,
+    SimulatedEmbeddingProvider,
+)
+from app.llm import LLMGateway
 from app.metrics.storage import SQLiteMetricsStore
 import tempfile
 import os
 from app.rate_limit import limiter
 
-@pytest.fixture
-def client():
-    # Setup isolated test database and service with real local embedding model
+
+def _make_client(provider):
+    # Isolated test database; the Groq call is mocked so no API key or network
+    # access is needed and no usage is billed.
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    
+
     test_store = SQLiteMetricsStore(db_path=path)
-    test_provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
     test_cache = SemanticCache(
-        embedding_provider=test_provider,
+        embedding_provider=provider,
         default_threshold=0.80,
         db_path=path,
     )
     test_service = QueryService(
         cache=test_cache,
         metrics_store=test_store,
+        gateway=LLMGateway(client=None, max_completion_tokens=512),
+    )
+    test_service._generate_response = lambda query, model_id: (
+        f"Mocked answer from {model_id}",
+        42,
+        17,
     )
 
     app.dependency_overrides[get_query_service] = lambda: test_service
-    
+    limiter.reset()
+    return path
+
+
+@pytest.fixture
+def client():
+    path = _make_client(SimulatedEmbeddingProvider(dimension=64))
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
-        
+
     app.dependency_overrides.clear()
     try:
         if os.path.exists(path):
@@ -40,14 +56,29 @@ def client():
     except PermissionError:
         pass
 
-def test_health_check(client):
-    res = client.get("/health")
+
+@pytest.fixture
+def real_embedding_client():
+    path = _make_client(SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2"))
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def test_health_check(api):
+    res = api.get("/health")
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "healthy"
     assert "version" in data
-    # Genuine embeddings mean simulated_mode is False
-    assert data["simulated_mode"] is False
+    # The test fixture uses the hashing embedder, which must be reported.
+    assert data["simulated_mode"] is True
+    assert data["llm_configured"] is False
+    assert data["database_ok"] is True
 
 def test_query_flow_cache_miss_then_hit(client):
     query_payload = {"query": "What is semantic caching in large language models?"}
@@ -58,8 +89,9 @@ def test_query_flow_cache_miss_then_hit(client):
     data1 = res1.json()
     assert data1["cache_hit"] is False
     assert data1["request_id"] is not None
-    assert data1["is_cache_simulated"] is False
+    assert data1["is_cache_simulated"] is True
     assert data1["estimated_cost"] > 0.0
+    assert data1["mode"] == "general"
     assert data1["latency_ms"] > 0.0
 
     # 2. Check metrics summary
@@ -69,7 +101,7 @@ def test_query_flow_cache_miss_then_hit(client):
     assert summary["total_requests"] == 1
     assert summary["cache_hits"] == 0
     assert summary["cache_misses"] == 1
-    assert summary["is_simulated"] is False
+    assert summary["is_simulated"] is True
 
     # 3. Second identical query is a cache hit
     res2 = client.post("/api/query", json=query_payload)
@@ -77,12 +109,18 @@ def test_query_flow_cache_miss_then_hit(client):
     data2 = res2.json()
     assert data2["cache_hit"] is True
     assert data2["cached_similarity"] >= 0.99
-    assert data2["is_cache_simulated"] is False
+    assert data2["cache_match_type"] == "exact"
     assert data2["estimated_cost"] == 0.0  # Zero spend on cache hit!
     assert "Cache Hit" in data2["routing_reason"]
 
-def test_semantic_paraphrase_hit_via_api(client):
+    # The avoided cost is the original generation's estimated cost.
+    summary = client.get("/api/metrics/summary").json()
+    assert summary["total_estimated_cost_avoided"] == pytest.approx(data1["estimated_cost"])
+
+@pytest.mark.requires_embedding_model
+def test_semantic_paraphrase_hit_via_api(real_embedding_client):
     """Verify that a paraphrased query hits the cache over the HTTP API based on actual embeddings and threshold."""
+    client = real_embedding_client
     base_query = {"query": "What is semantic caching in large language models?"}
     res1 = client.post("/api/query", json=base_query)
     assert res1.status_code == 200
@@ -147,12 +185,7 @@ def test_llm_failure_is_recorded_in_metrics(client):
     assert summary["cache_misses"] == 1
     assert summary["error_count"] == 1
     assert summary["error_rate"] == 1.0
-def test_query_rejects_oversized_input():
-    from fastapi.testclient import TestClient
-    from app.main import app
-
-    client = TestClient(app)
-
+def test_query_rejects_oversized_input(client):
     response = client.post(
         "/api/query",
         json={"query": "a" * 8001},
@@ -204,9 +237,7 @@ def test_provider_failure_returns_safe_502(client):
     assert summary["error_count"] == 1
 
 
-def test_query_rejects_oversized_metadata():
-    client = TestClient(app)
-
+def test_query_rejects_oversized_metadata(client):
     response = client.post(
         "/api/query",
         json={

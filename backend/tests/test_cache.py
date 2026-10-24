@@ -9,6 +9,7 @@ from app.cache.semantic import SemanticCache, cosine_similarity
 
 # --- Genuine Dense Embedding Tests ---
 
+@pytest.mark.requires_embedding_model
 def test_real_embedding_provider_properties():
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
     assert provider.dimension == 384
@@ -22,6 +23,7 @@ def test_real_embedding_provider_properties():
     norm = sum(x * x for x in vec)
     assert pytest.approx(norm, rel=1e-3) == 1.0
 
+@pytest.mark.requires_embedding_model
 def test_real_embedding_batch():
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
     texts = [
@@ -33,6 +35,7 @@ def test_real_embedding_batch():
     assert len(vecs[0]) == 384
     assert len(vecs[1]) == 384
 
+@pytest.mark.requires_embedding_model
 def test_real_semantic_paraphrase_hit():
     """Verify that actual sentence embeddings produce a similarity score and hit when threshold <= score."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -61,6 +64,7 @@ def test_real_semantic_paraphrase_hit():
     assert hit_result.is_simulated is False
 
 
+@pytest.mark.requires_embedding_model
 def test_real_semantic_unrelated_query_miss():
     """Verify that unrelated queries do not hit the semantic cache."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -79,6 +83,7 @@ def test_real_semantic_unrelated_query_miss():
     if result.similarity_score is not None:
         assert result.similarity_score < 0.40
 
+@pytest.mark.requires_embedding_model
 def test_threshold_sensitivity():
     """Verify that adjusting the threshold dynamically changes hit/miss decision based on embedding score."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -104,6 +109,7 @@ def test_threshold_sensitivity():
     lenient_res = cache.lookup(query, threshold=max(0.10, score - 0.05))
     assert lenient_res.is_hit is True
 
+@pytest.mark.requires_embedding_model
 def test_cache_persistence_across_restarts():
     """Verify that cached entries survive application restarts using SQLite."""
     fd, db_path = tempfile.mkstemp(suffix=".db")
@@ -137,6 +143,7 @@ def test_cache_persistence_across_restarts():
         except PermissionError:
             pass
 
+@pytest.mark.requires_embedding_model
 def test_empty_input_and_invalid_storage():
     """Verify safe handling of empty inputs and rejected empty responses."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -171,6 +178,7 @@ def test_cosine_similarity():
     v3 = [0.0, 1.0, 0.0]
     assert pytest.approx(cosine_similarity(v1, v3)) == 0.0
 
+@pytest.mark.requires_embedding_model
 def test_semantic_similarity_diagnostic():
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
 

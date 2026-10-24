@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { CheckCircle2, Zap, AlertCircle, ChevronDown, ChevronUp, Clock, DollarSign } from 'lucide-react';
-import { RequestRecord } from '../api/types';
+import { RequestRecordExtended } from '../api/types';
+import { fmtMs, OUTCOME_LABELS } from '../lib/format';
 
 interface RequestHistoryTableProps {
-  requests: RequestRecord[];
+  requests: RequestRecordExtended[];
   isLoading: boolean;
 }
 
@@ -43,6 +44,7 @@ export const RequestHistoryTable: React.FC<RequestHistoryTableProps> = ({ reques
             <tr className="border-b border-slate-800/80 bg-slate-950/40 text-[11px] font-mono uppercase tracking-wider text-slate-400">
               <th className="py-3 px-4">Time</th>
               <th className="py-3 px-4">Status</th>
+              <th className="py-3 px-4">Mode</th>
               <th className="py-3 px-4">Query</th>
               <th className="py-3 px-4">Model</th>
               <th className="py-3 px-4 text-right">Latency</th>
@@ -54,7 +56,7 @@ export const RequestHistoryTable: React.FC<RequestHistoryTableProps> = ({ reques
           <tbody className="divide-y divide-slate-800/60 text-xs font-mono">
             {requests.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-12 text-center text-slate-400">
+                <td colSpan={9} className="py-12 text-center text-slate-400">
                   <div className="flex flex-col items-center justify-center space-y-2">
                     <Clock className="w-6 h-6 text-slate-400" />
                     <span>No requests logged yet. Execute a query to view real-time telemetry.</span>
@@ -77,15 +79,32 @@ export const RequestHistoryTable: React.FC<RequestHistoryTableProps> = ({ reques
 
                       {/* Cache Status Badge */}
                       <td className="py-3 px-4 whitespace-nowrap">
-                        {record.cache_hit ? (
+                        {record.has_error ? (
+                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-rose-950/70 border border-rose-800/80 text-rose-400">
+                            <AlertCircle className="w-3 h-3" />
+                            <span>ERROR</span>
+                          </span>
+                        ) : record.cache_hit ? (
                           <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/70 border border-emerald-800/80 text-emerald-400">
                             <CheckCircle2 className="w-3 h-3" />
-                            <span>HIT</span>
+                            <span>HIT{record.cache_match_type ? ` · ${record.cache_match_type}` : ''}</span>
                           </span>
                         ) : (
                           <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-950/70 border border-amber-800/80 text-amber-400">
                             <Zap className="w-3 h-3" />
                             <span>MISS</span>
+                          </span>
+                        )}
+                      </td>
+
+                      {/* Mode / outcome */}
+                      <td className="py-3 px-4 whitespace-nowrap text-[11px]">
+                        <span className={record.mode === 'rag' ? 'text-sky-300' : 'text-slate-400'}>
+                          {record.mode === 'rag' ? 'RAG' : 'General'}
+                        </span>
+                        {record.outcome && record.outcome !== 'answered' && (
+                          <span className={`ml-1 ${record.outcome === 'error' ? 'text-rose-400' : 'text-amber-400'}`}>
+                            · {OUTCOME_LABELS[record.outcome] ?? record.outcome}
                           </span>
                         )}
                       </td>
@@ -128,7 +147,7 @@ export const RequestHistoryTable: React.FC<RequestHistoryTableProps> = ({ reques
                     {/* Expanded details row */}
                     {isExpanded && (
                       <tr className="bg-slate-950/80 border-b border-slate-800">
-                        <td colSpan={8} className="p-4 space-y-3 font-sans text-xs">
+                        <td colSpan={9} className="p-4 space-y-3 font-sans text-xs">
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
                               <span className="text-[11px] font-mono uppercase text-slate-400 block mb-1">
@@ -149,12 +168,31 @@ export const RequestHistoryTable: React.FC<RequestHistoryTableProps> = ({ reques
                             </div>
                           </div>
 
+                          {record.mode === 'rag' && (
+                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono text-slate-400">
+                              <span>Collection: <span className="text-slate-300">{record.collection ?? 'n/a'}</span></span>
+                              <span>Embed {fmtMs(record.embedding_ms)}</span>
+                              <span>Cache {fmtMs(record.cache_lookup_ms)}</span>
+                              <span>Retrieval {fmtMs(record.retrieval_ms)}</span>
+                              <span>Generation {fmtMs(record.generation_ms)}</span>
+                              <span>Chunks {record.retrieved_chunk_count ?? 'n/a'}</span>
+                              <span>Top score {record.top_retrieval_score?.toFixed(3) ?? 'n/a'}</span>
+                              <span>Citations {record.citation_count ?? 'n/a'}</span>
+                              {record.fallback_model && <span className="text-purple-300">Fallback → {record.fallback_model}</span>}
+                              {!!record.estimated_cost_avoided && <span className="text-emerald-300">Est. avoided ${record.estimated_cost_avoided.toFixed(6)}</span>}
+                            </div>
+                          )}
+                          {record.has_error && (
+                            <div className="text-[11px] font-mono text-rose-300">
+                              Error: {record.error_category ?? 'unknown'} {record.error_message ? `(${record.error_message})` : ''}
+                            </div>
+                          )}
                           <div className="flex flex-wrap items-center justify-between text-[11px] font-mono text-slate-400 pt-2 border-t border-slate-800/80">
                             <div>Request ID: <span className="text-slate-300">{record.request_id}</span></div>
                             <div className="flex items-center space-x-4">
                               <span>Tokens: {record.estimated_input_tokens} In / {record.estimated_output_tokens} Out</span>
                               <span>Similarity: {record.cached_similarity !== null && record.cached_similarity !== undefined ? `${(record.cached_similarity * 100).toFixed(1)}%` : 'N/A'}</span>
-                              <span>Provider Cost: <strong className="text-slate-400">Simulated / Mock</strong></span>
+                              <span>Actual billed cost: <strong className="text-slate-400">unavailable (estimates only)</strong></span>
                             </div>
                           </div>
                         </td>

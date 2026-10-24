@@ -5,9 +5,18 @@ import json
 import sqlite3
 import logging
 from contextlib import contextmanager
-from typing import Optional, Dict, Any, List, Generator
+from typing import Optional, Dict, Any, List, Generator, Callable
 from .base import BaseCache, CacheEntry, CacheLookupResult
 from .embeddings import BaseEmbeddingProvider, SimulatedEmbeddingProvider
+from .guards import normalize_query, salient_terms_conflict
+
+GENERAL_SCOPE = "general"
+# Semantic candidates above the threshold that are validated before giving up.
+MAX_SEMANTIC_CANDIDATES = 3
+
+# A validator inspects a semantic candidate and returns a rejection reason,
+# or None to accept it.
+CandidateValidator = Callable[[CacheEntry, float], Optional[str]]
 
 logger = logging.getLogger(__name__)
 
@@ -128,81 +137,132 @@ class SemanticCache(BaseCache):
         except Exception as e:
             logger.error(f"Failed to load cache entries from database: {e}")
 
-    def lookup(self, query: str, threshold: Optional[float] = None) -> CacheLookupResult:
-        start_time = time.perf_counter()
-        effective_threshold = threshold if threshold is not None else self.default_threshold
+    @staticmethod
+    def _entry_scope(entry: CacheEntry) -> str:
+        return entry.metadata.get("scope") or GENERAL_SCOPE
 
-        cleaned_query = query.strip() if query else ""
-        if not cleaned_query or not self._entries:
-            lookup_latency = (time.perf_counter() - start_time) * 1000.0
-            return CacheLookupResult(
-                is_hit=False,
-                similarity_score=None,
-                matched_entry=None,
-                is_simulated=self.embedding_provider.is_simulated,
-                lookup_latency_ms=round(lookup_latency, 2),
-            )
-
-        try:
-            query_embedding = self.embedding_provider.embed_text(cleaned_query)
-        except Exception as e:
-            logger.error(f"Embedding generation failed during cache lookup: {e}")
-            lookup_latency = (time.perf_counter() - start_time) * 1000.0
-            return CacheLookupResult(
-                is_hit=False,
-                similarity_score=None,
-                matched_entry=None,
-                is_simulated=self.embedding_provider.is_simulated,
-                lookup_latency_ms=round(lookup_latency, 2),
-            )
-
-        best_score = -1.0
-        best_entry: Optional[CacheEntry] = None
-
-        for entry in self._entries.values():
-            score = cosine_similarity(query_embedding, entry.embedding)
-            if score > best_score:
-                best_score = score
-                best_entry = entry
-
-        lookup_latency = (time.perf_counter() - start_time) * 1000.0
-
-        if best_entry is not None and best_score >= effective_threshold:
-            now = time.time()
-            best_entry.hit_count += 1
-            best_entry.last_accessed_at = now
-
-            # Sync hit count to DB if persistent
-            if self.db_path:
-                try:
-                    with self._connection() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE cache_entries SET hit_count = hit_count + 1, last_accessed_at = ? WHERE key = ?;",
-                            (now, best_entry.key),
-                        )
-                        conn.commit()
-                except Exception as e:
-                    logger.warning(f"Failed to update cache hit in database: {e}")
-
-            return CacheLookupResult(
-                is_hit=True,
-                similarity_score=round(best_score, 4),
-                matched_entry=best_entry,
-                is_simulated=self.embedding_provider.is_simulated,
-                lookup_latency_ms=round(lookup_latency, 2),
-            )
-
+    def _miss(self, start_time: float, **kwargs: Any) -> CacheLookupResult:
         return CacheLookupResult(
             is_hit=False,
-            similarity_score=round(best_score, 4) if best_score > -1.0 else None,
             matched_entry=None,
             is_simulated=self.embedding_provider.is_simulated,
-            lookup_latency_ms=round(lookup_latency, 2),
+            lookup_latency_ms=round((time.perf_counter() - start_time) * 1000.0, 2),
+            **kwargs,
+        )
+
+    def _record_hit(self, entry: CacheEntry) -> None:
+        now = time.time()
+        entry.hit_count += 1
+        entry.last_accessed_at = now
+        # Sync hit count to DB if persistent
+        if self.db_path:
+            try:
+                with self._connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE cache_entries SET hit_count = hit_count + 1, last_accessed_at = ? WHERE key = ?;",
+                        (now, entry.key),
+                    )
+                    conn.commit()
+            except Exception as e:
+                logger.warning(f"Failed to update cache hit in database: {e}")
+
+    def lookup(
+        self,
+        query: str,
+        threshold: Optional[float] = None,
+        scope: Optional[str] = None,
+        fingerprint: Optional[str] = None,
+        query_embedding: Optional[List[float]] = None,
+        validator: Optional[CandidateValidator] = None,
+    ) -> CacheLookupResult:
+        """Find a reusable cached response.
+
+        Only entries in the same ``scope`` (and, when given, with the same
+        corpus ``fingerprint``) are considered. A normalized exact text match
+        is reused directly. Otherwise the most similar entries at or above
+        the threshold are checked, best first, against the salient-term guard
+        and the optional ``validator``; the first that passes is a hit.
+        """
+        start_time = time.perf_counter()
+        effective_threshold = threshold if threshold is not None else self.default_threshold
+        scope = scope or GENERAL_SCOPE
+
+        cleaned_query = query.strip() if query else ""
+        candidates = [
+            e for e in self._entries.values()
+            if self._entry_scope(e) == scope
+            and (fingerprint is None or e.metadata.get("fingerprint") == fingerprint)
+        ]
+        if not cleaned_query or not candidates:
+            return self._miss(start_time)
+
+        normalized = normalize_query(cleaned_query)
+        for entry in candidates:
+            if normalize_query(entry.query) == normalized:
+                self._record_hit(entry)
+                return CacheLookupResult(
+                    is_hit=True,
+                    similarity_score=1.0,
+                    matched_entry=entry,
+                    is_simulated=self.embedding_provider.is_simulated,
+                    lookup_latency_ms=round((time.perf_counter() - start_time) * 1000.0, 2),
+                    match_type="exact",
+                    candidates_checked=1,
+                )
+
+        if query_embedding is None:
+            try:
+                query_embedding = self.embedding_provider.embed_text(cleaned_query)
+            except Exception as e:
+                logger.error(f"Embedding generation failed during cache lookup: {e}")
+                return self._miss(start_time)
+
+        scored = sorted(
+            ((cosine_similarity(query_embedding, e.embedding), e) for e in candidates),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        best_score = scored[0][0]
+        rejection: Optional[str] = None
+        checked = 0
+        for score, entry in scored[:MAX_SEMANTIC_CANDIDATES]:
+            if score < effective_threshold:
+                break
+            checked += 1
+            reason = salient_terms_conflict(cleaned_query, entry.query)
+            if reason is None and validator is not None:
+                try:
+                    reason = validator(entry, score)
+                except Exception as e:
+                    logger.warning(f"Cache candidate validation failed: {e}")
+                    reason = "validation error"
+            if reason is None:
+                self._record_hit(entry)
+                return CacheLookupResult(
+                    is_hit=True,
+                    similarity_score=round(score, 4),
+                    matched_entry=entry,
+                    is_simulated=self.embedding_provider.is_simulated,
+                    lookup_latency_ms=round((time.perf_counter() - start_time) * 1000.0, 2),
+                    match_type="semantic",
+                    candidates_checked=checked,
+                )
+            rejection = rejection or reason
+
+        return self._miss(
+            start_time,
+            similarity_score=round(best_score, 4),
+            rejection_reason=rejection,
+            candidates_checked=checked,
         )
 
     def store(
-        self, query: str, response: str, metadata: Optional[Dict[str, Any]] = None
+        self,
+        query: str,
+        response: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        embedding: Optional[List[float]] = None,
     ) -> Optional[CacheEntry]:
         cleaned_query = query.strip() if query else ""
         cleaned_response = response.strip() if response else ""
@@ -225,11 +285,12 @@ class SemanticCache(BaseCache):
                 except Exception as e:
                     logger.warning(f"Failed to evict entry from database: {e}")
 
-        try:
-            embedding = self.embedding_provider.embed_text(cleaned_query)
-        except Exception as e:
-            logger.error(f"Failed to generate embedding for cache storage: {e}")
-            return None
+        if embedding is None:
+            try:
+                embedding = self.embedding_provider.embed_text(cleaned_query)
+            except Exception as e:
+                logger.error(f"Failed to generate embedding for cache storage: {e}")
+                return None
 
         entry_id = str(uuid.uuid4())
         now = time.time()
@@ -274,6 +335,26 @@ class SemanticCache(BaseCache):
 
         return entry
 
+    def invalidate(self, predicate: Callable[[CacheEntry], bool]) -> int:
+        """Delete every entry for which ``predicate`` is true. Returns count."""
+        doomed = [k for k, e in self._entries.items() if predicate(e)]
+        for key in doomed:
+            del self._entries[key]
+        if doomed and self.db_path:
+            try:
+                with self._connection() as conn:
+                    conn.executemany(
+                        "DELETE FROM cache_entries WHERE key = ?;",
+                        [(k,) for k in doomed],
+                    )
+                    conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to delete invalidated cache entries: {e}")
+        return len(doomed)
+
+    def invalidate_scope_prefix(self, prefix: str) -> int:
+        return self.invalidate(lambda e: self._entry_scope(e).startswith(prefix))
+
     def clear(self) -> None:
         self._entries.clear()
         if self.db_path:
@@ -293,4 +374,12 @@ class SemanticCache(BaseCache):
             "embedding_provider": self.embedding_provider.provider_name,
             "is_simulated": self.embedding_provider.is_simulated,
             "persistent_storage": bool(self.db_path),
+            "entries_by_scope": self._count_by_scope(),
         }
+
+    def _count_by_scope(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for entry in self._entries.values():
+            scope = self._entry_scope(entry)
+            counts[scope] = counts.get(scope, 0) + 1
+        return counts

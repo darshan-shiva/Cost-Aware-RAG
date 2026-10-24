@@ -11,6 +11,7 @@ from app.cache.embeddings import (
 # Genuine Dense Embedding Tests (sentence-transformers/all-MiniLM-L6-v2)
 # ==============================================================================
 
+@pytest.mark.requires_embedding_model
 def test_embedding_output_dimensions():
     """Verify that genuine dense embeddings produce exactly 384-dimensional vectors."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -23,6 +24,7 @@ def test_embedding_output_dimensions():
     assert len(vector) == 384
     assert all(isinstance(x, float) for x in vector)
 
+@pytest.mark.requires_embedding_model
 def test_embedding_repeatability():
     """Verify that identical inputs produce identical numerical embedding vectors."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -35,6 +37,7 @@ def test_embedding_repeatability():
     for a, b in zip(vec1, vec2):
         assert a == pytest.approx(b, abs=1e-6)
 
+@pytest.mark.requires_embedding_model
 def test_embedding_unit_normalization():
     """Verify that embeddings are L2-normalized to unit hypersphere (sum of squares == 1.0)."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -43,6 +46,7 @@ def test_embedding_unit_normalization():
     norm_squared = sum(x * x for x in vector)
     assert pytest.approx(norm_squared, rel=1e-3) == 1.0
 
+@pytest.mark.requires_embedding_model
 def test_embedding_batch_generation():
     """Verify batch embedding generation produces consistent vectors for all items."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -58,6 +62,7 @@ def test_embedding_batch_generation():
         norm_squared = sum(x * x for x in vec)
         assert pytest.approx(norm_squared, rel=1e-3) == 1.0
 
+@pytest.mark.requires_embedding_model
 def test_embedding_empty_and_whitespace_input():
     """Verify that empty strings, whitespace, and None return zero-vectors safely."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -77,6 +82,7 @@ def test_embedding_empty_and_whitespace_input():
     assert len(zero_vec_ws) == 384
     assert all(x == 0.0 for x in zero_vec_ws)
 
+@pytest.mark.requires_embedding_model
 def test_embedding_invalid_type_input():
     """Verify that non-string inputs raise TypeError."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -87,6 +93,7 @@ def test_embedding_invalid_type_input():
     with pytest.raises(TypeError, match="Expected list of strings"):
         provider.embed_batch("not a list")  # type: ignore
 
+@pytest.mark.requires_embedding_model
 def test_model_caching_and_singleton_reuse():
     """Verify that loading the same model twice reuses the cached model instance."""
     p1 = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")
@@ -95,6 +102,7 @@ def test_model_caching_and_singleton_reuse():
     assert p1._model is p2._model
     assert id(p1._model) == id(p2._model)
 
+@pytest.mark.requires_embedding_model
 def test_embedding_factory():
     """Verify get_embedding_provider factory instantiates correct providers."""
     real_p = get_embedding_provider("sentence-transformers", "all-MiniLM-L6-v2")
@@ -120,6 +128,7 @@ def test_mock_model_loading_failure():
             # Use unique model name to avoid hitting existing _model_cache
             SentenceTransformersEmbeddingProvider("nonexistent-corrupted-model-name-xyz")
 
+@pytest.mark.requires_embedding_model
 def test_mock_inference_error_handling():
     """[MOCK TEST] Verify that an unexpected runtime failure during model.encode raises RuntimeError."""
     provider = SentenceTransformersEmbeddingProvider("all-MiniLM-L6-v2")

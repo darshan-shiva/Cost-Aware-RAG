@@ -23,13 +23,13 @@ const PRESET_QUERIES = [
   {
     label: '1. Simple Query (Fast Tier)',
     query: 'What is semantic caching in RAG pipelines?',
-    desc: 'Routes to Groq lightweight model (GPT-OSS 20B)',
+    desc: 'Expected to route to the lightweight tier',
   },
   {
     label: '2. Complex Reasoning (Capable Tier)',
     query:
       'Compare the tradeoffs between semantic caching and prompt distillation for latency sensitive multi-tenant systems.',
-    desc: 'Routes to Groq reasoning model (GPT-OSS 120B)',
+    desc: 'Expected to route to the complex tier (analytical keywords)',
   },
   {
     label: '3. Paraphrase Cache Hit',
@@ -74,14 +74,21 @@ export const QueryRunner: React.FC<QueryRunnerProps> = ({
         <div className="flex items-center space-x-2">
           <Sparkles className="w-4 h-4 text-emerald-400" />
           <h2 className="text-sm font-semibold text-slate-200">
-            Interactive Pipeline Runner
+            General-knowledge mode
           </h2>
+          <span className="rounded border border-amber-800/60 bg-amber-950/40 px-1.5 py-0.5 font-mono text-[10px] text-amber-300">
+            NOT GROUNDED · NO CITATIONS
+          </span>
         </div>
 
         <span className="text-[11px] text-slate-400 font-mono">
-          Groq LLM Inference • Sentence Transformers Cache • SQLite Telemetry
+          Model knowledge only • no document retrieval
         </span>
       </div>
+      <p className="mt-3 text-xs text-slate-400">
+        Answers here come from the model's own training data and can be wrong or out of date. Use “Ask documents”
+        for answers grounded in your uploaded files.
+      </p>
 
       <div className="mt-4">
         <label className="text-xs text-slate-400 mb-2 block">

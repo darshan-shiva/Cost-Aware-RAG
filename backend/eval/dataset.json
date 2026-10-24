@@ -1,0 +1,74 @@
+{
+  "description": "Synthetic evaluation workload for the Cost-Aware RAG pipeline. Expected evidence is (file, page). 'keywords' must all appear in a correct answer (case-insensitive). See eval/README.md.",
+  "documents": [
+    "northwind-employee-handbook.pdf",
+    "aurora-battery-manual.pdf",
+    "greenfield-refund-policy.txt"
+  ],
+  "phases": [
+    {
+      "name": "cold",
+      "description": "Every distinct question asked once against an empty cache.",
+      "queries": [
+        {"id": "A1", "category": "answerable", "query": "How many days of paid vacation do full-time employees get?", "evidence": [["northwind-employee-handbook.pdf", 2]], "keywords": ["26"]},
+        {"id": "A2", "category": "answerable", "query": "What are the core collaboration hours at Northwind?", "evidence": [["northwind-employee-handbook.pdf", 1]], "keywords": ["10:00", "15:00"]},
+        {"id": "A3", "category": "answerable", "query": "How long is the probation period before remote work is allowed?", "evidence": [["northwind-employee-handbook.pdf", 3]], "keywords": ["6 months"]},
+        {"id": "A4", "category": "answerable", "query": "What is the daily meal allowance during business travel?", "evidence": [["northwind-employee-handbook.pdf", 4]], "keywords": ["45"]},
+        {"id": "A5", "category": "answerable", "query": "Within how many hours must a lost laptop be reported?", "evidence": [["northwind-employee-handbook.pdf", 4]], "keywords": ["24 hours"]},
+        {"id": "A6", "category": "answerable", "query": "How much is the home office allowance?", "evidence": [["northwind-employee-handbook.pdf", 3]], "keywords": ["400"]},
+        {"id": "A7", "category": "answerable", "query": "What is the capacity of the Aurora X3?", "evidence": [["aurora-battery-manual.pdf", 1]], "keywords": ["10,000"]},
+        {"id": "A8", "category": "answerable", "query": "How long does the Aurora X2 take to fully charge?", "evidence": [["aurora-battery-manual.pdf", 2]], "keywords": ["2 hours"]},
+        {"id": "A9", "category": "answerable", "query": "How many days do customers have to return unused items?", "evidence": [["greenfield-refund-policy.txt", 1]], "keywords": ["30 days"]},
+        {"id": "A10", "category": "answerable", "query": "How quickly are refunds processed after inspection?", "evidence": [["greenfield-refund-policy.txt", 1]], "keywords": ["5 business days"]},
+        {"id": "M1", "category": "multi_chunk", "query": "What is the standard working week and how many vacation days do full-time employees get?", "evidence": [["northwind-employee-handbook.pdf", 1], ["northwind-employee-handbook.pdf", 2]], "keywords": ["37.5", "26"]},
+        {"id": "M2", "category": "multi_chunk", "query": "Compare the fast charging wattage and the warranty length of the Aurora X3.", "evidence": [["aurora-battery-manual.pdf", 2], ["aurora-battery-manual.pdf", 3]], "keywords": ["65", "24 month"]},
+        {"id": "M3", "category": "multi_chunk", "query": "What do Northwind expense claims require, and can Greenfield final sale items be returned?", "evidence": [["northwind-employee-handbook.pdf", 4], ["greenfield-refund-policy.txt", 1]], "keywords": ["receipt", "final sale"]},
+        {"id": "L1", "category": "lookalike", "query": "What is the warranty period of the Aurora X2?", "evidence": [["aurora-battery-manual.pdf", 3]], "keywords": ["12 month"], "pair": "L2"},
+        {"id": "L2", "category": "lookalike", "query": "What is the warranty period of the Aurora X3?", "evidence": [["aurora-battery-manual.pdf", 3]], "keywords": ["24 month"], "pair": "L1"},
+        {"id": "L3", "category": "lookalike", "query": "How many watts does the Aurora X2 fast charging support?", "evidence": [["aurora-battery-manual.pdf", 2]], "keywords": ["30"], "pair": "L4"},
+        {"id": "L4", "category": "lookalike", "query": "How many watts does the Aurora X3 fast charging support?", "evidence": [["aurora-battery-manual.pdf", 2]], "keywords": ["65"], "pair": "L3"},
+        {"id": "L5", "category": "lookalike", "query": "How many vacation days do full-time employees receive?", "evidence": [["northwind-employee-handbook.pdf", 2]], "keywords": ["26"], "pair": "L6"},
+        {"id": "L6", "category": "lookalike", "query": "How many vacation days do part-time employees receive?", "evidence": [["northwind-employee-handbook.pdf", 2]], "keywords": ["pro rata"], "pair": "L5"},
+        {"id": "U1", "category": "unsupported", "query": "What is the name of the CEO of Northwind Logistics?", "evidence": [], "keywords": []},
+        {"id": "U2", "category": "unsupported", "query": "What is the capital of Australia?", "evidence": [], "keywords": []},
+        {"id": "U3", "category": "unsupported", "query": "How many parking spaces does the Greenfield flagship store have?", "evidence": [], "keywords": []},
+        {"id": "U4", "category": "unsupported_on_topic", "query": "Does the Aurora X3 support solar charging?", "evidence": [], "keywords": []}
+      ]
+    },
+    {
+      "name": "warm",
+      "description": "Exact repeats and paraphrases of cold questions. Expected evidence is the original question's.",
+      "queries": [
+        {"id": "R1", "category": "repeat", "of": "A1", "query": "How many days of paid vacation do full-time employees get?", "evidence": [["northwind-employee-handbook.pdf", 2]], "keywords": ["26"]},
+        {"id": "R2", "category": "repeat", "of": "A3", "query": "how long is the probation period before remote work is allowed", "evidence": [["northwind-employee-handbook.pdf", 3]], "keywords": ["6 months"]},
+        {"id": "R3", "category": "repeat", "of": "A5", "query": "Within how many hours must a lost laptop be reported?", "evidence": [["northwind-employee-handbook.pdf", 4]], "keywords": ["24 hours"]},
+        {"id": "R4", "category": "repeat", "of": "L1", "query": "What is the warranty period of the Aurora X2?", "evidence": [["aurora-battery-manual.pdf", 3]], "keywords": ["12 month"]},
+        {"id": "R5", "category": "repeat", "of": "L2", "query": "What is the warranty period of the Aurora X3?", "evidence": [["aurora-battery-manual.pdf", 3]], "keywords": ["24 month"]},
+        {"id": "P1", "category": "paraphrase", "of": "A1", "query": "How much paid vacation does a full-time employee get each year?", "evidence": [["northwind-employee-handbook.pdf", 2]], "keywords": ["26"]},
+        {"id": "P2", "category": "paraphrase", "of": "A2", "query": "What are Northwind's core collaboration hours?", "evidence": [["northwind-employee-handbook.pdf", 1]], "keywords": ["10:00", "15:00"]},
+        {"id": "P3", "category": "paraphrase", "of": "A4", "query": "What is the meal allowance per day on business travel?", "evidence": [["northwind-employee-handbook.pdf", 4]], "keywords": ["45"]},
+        {"id": "P4", "category": "paraphrase", "of": "A7", "query": "What capacity does the Aurora X3 battery have?", "evidence": [["aurora-battery-manual.pdf", 1]], "keywords": ["10,000"]},
+        {"id": "P5", "category": "paraphrase", "of": "A8", "query": "How long does it take to fully charge the Aurora X2?", "evidence": [["aurora-battery-manual.pdf", 2]], "keywords": ["2 hours"]},
+        {"id": "P6", "category": "paraphrase", "of": "A9", "query": "How many days do customers have to return items that are unused?", "evidence": [["greenfield-refund-policy.txt", 1]], "keywords": ["30 days"]}
+      ]
+    },
+    {
+      "name": "changed",
+      "description": "greenfield-refund-policy.txt is replaced by its v2 text (same filename), then refund questions are asked again. Answers must reflect v2; v1 cache entries must not be served.",
+      "action": {"replace": "greenfield-refund-policy.txt", "with": "greenfield-refund-policy-v2.txt"},
+      "queries": [
+        {"id": "C1", "category": "changed_document", "of": "A9", "query": "How many days do customers have to return unused items?", "evidence": [["greenfield-refund-policy.txt", 1]], "keywords": ["45 days"], "stale_keywords": ["30 days"]},
+        {"id": "C2", "category": "changed_document", "of": "A10", "query": "How quickly are refunds processed after inspection?", "evidence": [["greenfield-refund-policy.txt", 1]], "keywords": ["3 business days"], "stale_keywords": ["5 business days"]}
+      ]
+    },
+    {
+      "name": "deleted",
+      "description": "aurora-battery-manual.pdf is deleted, then battery questions are asked again. No answer may cite the deleted document.",
+      "action": {"delete": "aurora-battery-manual.pdf"},
+      "queries": [
+        {"id": "D1", "category": "deleted_document", "of": "A7", "query": "What is the capacity of the Aurora X3?", "evidence": [], "keywords": [], "deleted": "aurora-battery-manual.pdf"},
+        {"id": "D2", "category": "deleted_document", "of": "L1", "query": "What is the warranty period of the Aurora X2?", "evidence": [], "keywords": [], "deleted": "aurora-battery-manual.pdf"}
+      ]
+    }
+  ]
+}
