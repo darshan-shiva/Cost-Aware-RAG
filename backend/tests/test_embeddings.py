@@ -123,6 +123,8 @@ def test_embedding_factory():
 
 def test_mock_model_loading_failure():
     """[MOCK TEST] Verify that an unresolvable or corrupted model name raises RuntimeError."""
+    # patch() imports the package, which requirements-lite.txt does not install.
+    pytest.importorskip("sentence_transformers")
     with patch("sentence_transformers.SentenceTransformer", side_effect=Exception("Model weights missing")):
         with pytest.raises(RuntimeError, match="Could not initialize local embedding model"):
             # Use unique model name to avoid hitting existing _model_cache
