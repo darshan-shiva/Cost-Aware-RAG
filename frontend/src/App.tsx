@@ -156,7 +156,7 @@ export function App() {
       </main>
 
       <footer className="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs text-slate-400 font-mono">
-        Cost-Aware RAG Engine • Phase 5 Observability • Semantic Caching & Model Routing
+        Cost-Aware RAG Engine • Semantic Caching & Model Routing
       </footer>
     </div>
   );
