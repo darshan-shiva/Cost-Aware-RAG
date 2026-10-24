@@ -1,10 +1,19 @@
 # Cost-Aware RAG: Semantic Caching & Intelligent Model Routing
 
-A cost-aware AI infrastructure project that reduces repeated LLM inference through semantic caching and routes queries to different model tiers based on estimated complexity. It combines local sentence embeddings, Groq-hosted LLM inference, SQLite telemetry, structured logging, and an interactive React dashboard.
+A cost-aware AI infrastructure project that reduces repeated LLM inference through semantic caching and routes queries to different model tiers based on estimated complexity. It combines configurable embeddings, Groq-hosted LLM inference, SQLite telemetry, structured logging, and an interactive React dashboard.
+
+## Live Demo
+
+- **Frontend dashboard:** https://cost-aware-rag.vercel.app/
+- **Backend API:** https://cost-aware-rag.onrender.com
+- **Interactive API documentation:** https://cost-aware-rag.onrender.com/docs
+- **Health check:** https://cost-aware-rag.onrender.com/health
+
+The frontend is deployed on Vercel and communicates with a FastAPI backend deployed on Render. The dashboard supports query submission, model-routing visibility, estimated cost and latency metrics, cache outcomes, and request telemetry.
 
 ## Project Status
 
-**Completed through Phase 6: Security, Reliability & Scalability**
+**Phases 1–6 completed; Phase 7 deployment is live.**
 
 - **Phase 1 — Foundation:** Backend API, frontend dashboard, and SQLite telemetry.
 - **Phase 2 — Real Semantic Caching:** Local `all-MiniLM-L6-v2` embeddings, cosine-similarity matching, persistent cache storage, and cache statistics.
@@ -13,18 +22,20 @@ A cost-aware AI infrastructure project that reduces repeated LLM inference throu
 - **Phase 5 — Production-Grade Observability:** Structured request logging, error telemetry, latency statistics, and an enhanced dashboard with real-time metrics.
 - **Phase 6 — Security, Reliability & Scalability:** Configurable CORS origins, query and metadata validation, SlowAPI rate limiting, safe provider-error responses, timeout/retry configuration, structured request logging, and expanded reliability tests.
 
-Phase 7 focuses on final dashboard improvements and deployment.
+Phase 7 covers final dashboard improvements and deployment. The frontend and backend are deployed; further UI polish and hosted cache-quality validation remain ongoing.
 
 ## Features
 
 ### 1. Semantic Caching
 
-- Local embeddings using Sentence Transformers (`all-MiniLM-L6-v2`).
-- Cosine-similarity matching with a configurable threshold.
+- Configurable embedding provider: Sentence Transformers (`all-MiniLM-L6-v2`) locally, or lightweight simulated embeddings for constrained environments.
+- Cosine-similarity matching with a configurable threshold when using a compatible embedding provider.
 - SQLite-backed cache persistence.
 - Cache bypass through force refresh.
 - Cache hits reuse stored responses and avoid another LLM generation call.
 - Cache lookup performance evaluation using real embeddings.
+
+**Deployment note:** The current Render deployment uses simulated embeddings to stay within the available memory limit. Its cache-matching behavior is not equivalent to the local Sentence Transformers configuration. Use a host with sufficient memory and configure the Sentence Transformers provider to evaluate genuine semantic embeddings in the deployed environment.
 
 ### 2. Intelligent Model Routing
 
@@ -213,6 +224,18 @@ Open the local URL printed by Vite, typically:
 
 `http://localhost:5173`
 
+### Production environment configuration
+
+For the Vercel frontend, set this environment variable for the **Production** environment:
+
+```dotenv
+VITE_API_BASE_URL=https://cost-aware-rag.onrender.com
+```
+
+Redeploy the frontend after changing environment variables because Vite embeds `VITE_` variables into the frontend build.
+
+For Render, configure the backend environment variables required by `app/config.py`. The application uses the `RAG_` prefix for settings, for example `RAG_GROQ_API_KEY` and `RAG_EMBEDDING_PROVIDER`. Configure CORS to allow the deployed frontend origin (`https://cost-aware-rag.vercel.app`). Keep provider API keys in the backend environment only; never put secrets in `VITE_` variables.
+
 ## Observability API
 
 | Endpoint | Method | Purpose |
@@ -298,6 +321,7 @@ This is a projection, not measured production savings. It assumes cache hits avo
 
 ## Current Limitations
 
+- The hosted Render deployment currently uses simulated embeddings because the genuine Sentence Transformers/PyTorch stack exceeded the available memory limit on the selected instance. The local setup can use `all-MiniLM-L6-v2`.
 - Routing is rule-based rather than driven by a trained complexity classifier.
 - Estimated costs depend on configured token prices and may differ from actual provider billing.
 - No retrieval corpus or document-ingestion pipeline is documented as implemented here; the current focus is semantic response caching and model routing.
@@ -313,7 +337,8 @@ This is a projection, not measured production savings. It assumes cache hits avo
 - [x] Phase 4 — Cache Quality & Performance Evaluation
 - [x] Phase 5 — Production-Grade Observability
 - [x] Phase 6 — Reliability, Security & Scalability
-- [ ] Phase 7 — Final Dashboard & Deployment
+- [x] Phase 7 — Initial Dashboard Deployment (Vercel + Render)
+- [ ] Phase 7 — Final Dashboard Polish & Hosted Cache Validation
 
 ## Security
 
@@ -321,6 +346,7 @@ This is a projection, not measured production savings. It assumes cache hits avo
 - Do not commit `.env`, virtual environments, or local database files.
 - Avoid including secrets in logs, screenshots, or public issue reports.
 - Configure CORS origins for the intended frontend and configure authentication before exposing the service publicly.
+- Set `VITE_API_BASE_URL` to the public backend URL; this value is not a secret, but provider API keys must never be exposed through frontend variables.
 - The query endpoint is configured for 30 requests per minute; verify proxy/client-IP handling and deployment-specific rate-limit behavior before public exposure.
 - Treat request queries and response previews as potentially sensitive data when retaining telemetry.
 
